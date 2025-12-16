@@ -1,0 +1,55 @@
+# Systemd service for Devstral-24B model
+# Install to: /etc/systemd/system/llama-devstral.service
+#
+# For user-level service, install to: ~/.config/systemd/user/llama-devstral.service
+# and use: systemctl --user enable/start llama-devstral
+
+[Unit]
+Description=LLaMA Server - Devstral 24B
+Documentation=https://github.com/ggerganov/llama.cpp
+After=network.target
+
+[Service]
+Type=simple
+
+# ROCm/HIP environment for AMD Strix Halo APU
+Environment="HSA_OVERRIDE_GFX_VERSION=11.5.1"
+Environment="HIP_VISIBLE_DEVICES=0"
+Environment="GPU_MAX_HW_QUEUES=8"
+Environment="HSA_ENABLE_SDMA=0"
+Environment="GPU_MAX_HEAP_SIZE=99"
+Environment="GPU_MAX_ALLOC_PERCENT=99"
+
+# Server configuration
+ExecStart=/home/ztaylor/llama.cpp/build-uma/bin/llama-server \
+    --model /home/ztaylor/models/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --ctx-size 131072 \
+    --n-gpu-layers 999 \
+    --flash-attn on \
+    --cache-type-k q8_0 \
+    --cache-type-v q8_0 \
+    --no-mmap \
+    --api-key-file /home/ztaylor/certs/llama-api.key
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# Resource limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Working directory
+WorkingDirectory=/home/ztaylor/llama.cpp
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llama-devstral
+
+[Install]
+WantedBy=default.target

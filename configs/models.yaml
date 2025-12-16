@@ -1,0 +1,96 @@
+# Model configurations for local LLM infrastructure
+# Used by start-server.sh and management scripts
+
+models:
+  devstral:
+    name: "Devstral-Small-2-24B"
+    file: "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf"
+    size_gb: 13.3
+    context_max: 262144
+    context_default: 131072
+    use_case: "coding"
+    quantization: "Q4_K_M"
+    url: "https://huggingface.co/mistralai/Devstral-Small-2-24B-GGUF"
+
+  qwen3-coder:
+    name: "Qwen3-Coder-30B"
+    file: "Qwen3-Coder-30B-Q4_K_M.gguf"
+    size_gb: 17.0
+    context_max: 131072
+    context_default: 65536
+    use_case: "coding"
+    quantization: "Q4_K_M"
+    url: "https://huggingface.co/Qwen/Qwen3-Coder-30B-GGUF"
+
+  qwen25-coder-14b:
+    name: "Qwen2.5-Coder-14B"
+    file: "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf"
+    size_gb: 8.0
+    context_max: 131072
+    context_default: 65536
+    use_case: "coding"
+    quantization: "Q4_K_M"
+    url: "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF"
+
+  codestral:
+    name: "Codestral-22B"
+    file: "Codestral-22B-v0.1-Q4_K_M.gguf"
+    size_gb: 12.5
+    context_max: 32768
+    context_default: 32768
+    use_case: "coding"
+    quantization: "Q4_K_M"
+    url: "https://huggingface.co/mistralai/Codestral-22B-v0.1-GGUF"
+
+  deepseek-coder:
+    name: "DeepSeek-Coder-V2-Lite"
+    file: "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf"
+    size_gb: 9.0
+    context_max: 163840
+    context_default: 65536
+    use_case: "coding"
+    quantization: "Q4_K_M"
+    url: "https://huggingface.co/deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct-GGUF"
+
+  llama3-70b:
+    name: "Llama-3.1-70B-Instruct"
+    file: "Meta-Llama-3.1-70B-Instruct-Q4_K_M.gguf"
+    size_gb: 40.0
+    context_max: 131072
+    context_default: 32768
+    use_case: "general"
+    quantization: "Q4_K_M"
+    url: "https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct-GGUF"
+
+# Hardware profiles
+hardware:
+  strix-halo-96gb:
+    description: "AMD Ryzen AI Max+ 395 with 96GB VRAM"
+    gpu_arch: "gfx1151"
+    vram_total: 96
+    vram_available: 90  # Leave some for system
+    recommended_build: "uma"
+    recommended_flags:
+      - "--flash-attn on"
+      - "--cache-type-k q8_0"
+      - "--cache-type-v q8_0"
+      - "--no-mmap"
+
+  rdna3-24gb:
+    description: "AMD RX 7900 XTX with 24GB VRAM"
+    gpu_arch: "gfx1100"
+    vram_total: 24
+    vram_available: 22
+    recommended_build: "rocm"
+    recommended_flags:
+      - "--flash-attn on"
+
+  vulkan-generic:
+    description: "Generic Vulkan fallback"
+    recommended_build: "vulkan"
+    recommended_flags:
+      - "--flash-attn on"
+
+# Memory estimation formula
+# KV cache (Q8): ctx_size * n_layers * d_model * 2 * 2 * 0.5 / 1e9 GB
+# Example: 131072 * 32 * 4096 * 2 * 2 * 0.5 / 1e9 ≈ 11 GB
