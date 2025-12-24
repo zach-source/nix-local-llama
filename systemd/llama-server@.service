@@ -1,12 +1,12 @@
 # Systemd template service for llama.cpp server
-# Install to: /etc/systemd/system/llama-server@.service
+# Install to: ~/.config/systemd/user/llama-server@.service (user) or /etc/systemd/system/ (system)
 #
 # Usage:
-#   systemctl enable llama-server@devstral
-#   systemctl start llama-server@devstral
+#   systemctl --user enable llama-server@qwen3-coder
+#   systemctl --user start llama-server@qwen3-coder
 #
 # The instance name (%i) is used as the model config name
-# Config files should be in /etc/llama-server/%i.conf
+# Config files should be in ~/workspaces/local-llama/configs/%i.conf
 
 [Unit]
 Description=LLaMA Server (%i)
@@ -16,53 +16,35 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=llama
-Group=llama
 
 # ROCm/HIP environment for AMD GPUs
 Environment="HSA_OVERRIDE_GFX_VERSION=11.5.1"
 Environment="HIP_VISIBLE_DEVICES=0"
 Environment="GPU_MAX_HW_QUEUES=8"
+Environment="LD_LIBRARY_PATH=/opt/rocm/lib:/usr/lib/x86_64-linux-gnu"
+
+# UMA activation for APUs
+Environment="GGML_CUDA_ENABLE_UNIFIED_MEMORY=1"
+Environment="ROCBLAS_USE_HIPBLASLT=1"
 
 # Memory settings
 Environment="HSA_ENABLE_SDMA=0"
 Environment="GPU_MAX_HEAP_SIZE=99"
 Environment="GPU_MAX_ALLOC_PERCENT=99"
 
-# Load instance-specific config if exists
-EnvironmentFile=-/etc/llama-server/%i.conf
+# Load instance-specific config
+EnvironmentFile=%h/workspaces/local-llama/configs/%i.conf
 
-# Default paths (override in config file)
-Environment="LLAMA_BIN=/opt/llama.cpp/build-uma/bin/llama-server"
-Environment="MODEL_PATH=/models/%i.gguf"
-Environment="HOST=0.0.0.0"
-Environment="PORT=8000"
-Environment="CTX_SIZE=131072"
-Environment="N_GPU_LAYERS=999"
+# Default values (override in config file)
+Environment="EXTRA_FLAGS="
 
-ExecStart=${LLAMA_BIN} \
-    --model ${MODEL_PATH} \
-    --host ${HOST} \
-    --port ${PORT} \
-    --ctx-size ${CTX_SIZE} \
-    --n-gpu-layers ${N_GPU_LAYERS} \
-    --flash-attn on \
-    --cache-type-k q8_0 \
-    --cache-type-v q8_0 \
-    --no-mmap
+ExecStart=/bin/bash -c '${LLAMA_BIN} --model ${MODEL_PATH} --host ${HOST} --port ${PORT} --ctx-size ${CTX_SIZE} --n-gpu-layers ${N_GPU_LAYERS} ${EXTRA_FLAGS}'
 
 # Restart on failure
 Restart=on-failure
 RestartSec=10
 StartLimitBurst=3
 StartLimitIntervalSec=60
-
-# Security hardening
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadOnlyPaths=/
-ReadWritePaths=/var/log/llama-server
 
 # Resource limits
 LimitNOFILE=65536
@@ -74,4 +56,4 @@ StandardError=journal
 SyslogIdentifier=llama-server-%i
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

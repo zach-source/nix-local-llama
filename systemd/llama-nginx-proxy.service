@@ -1,0 +1,37 @@
+# Systemd service for nginx TLS proxy for llama servers
+# Install to: ~/.config/systemd/user/llama-nginx-proxy.service
+#
+# Usage:
+#   systemctl --user enable llama-nginx-proxy
+#   systemctl --user start llama-nginx-proxy
+
+[Unit]
+Description=Nginx TLS Proxy for LLaMA Servers
+After=network.target docker.service
+Wants=llama-server@qwen3-coder.service llama-server@qwen3-embed.service llama-server@bge-reranker.service
+
+[Service]
+Type=simple
+
+ExecStartPre=-/usr/bin/docker rm -f llama-nginx-proxy
+ExecStart=/usr/bin/docker run --rm --name llama-nginx-proxy \
+    --network host \
+    -v /home/ztaylor/certs:/certs:ro \
+    -v /home/ztaylor/certs/nginx/nginx.conf:/etc/nginx/nginx.conf:ro \
+    nginx:alpine
+
+ExecStop=/usr/bin/docker stop llama-nginx-proxy
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llama-nginx-proxy
+
+[Install]
+WantedBy=default.target

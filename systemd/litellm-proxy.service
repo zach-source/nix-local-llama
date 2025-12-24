@@ -1,0 +1,40 @@
+# Systemd service for LiteLLM AI Proxy
+# Install to: /etc/systemd/system/litellm-proxy.service
+#
+# Usage:
+#   systemctl enable litellm-proxy
+#   systemctl start litellm-proxy
+
+[Unit]
+Description=LiteLLM AI Proxy for Local LLM Servers
+Documentation=https://docs.litellm.ai/
+After=network.target
+Wants=llama-server@qwen3-coder.service llama-server@qwen3-embed.service llama-server@bge-reranker.service
+
+[Service]
+Type=simple
+User=ztaylor
+Group=ztaylor
+WorkingDirectory=/home/ztaylor/workspaces/local-llama
+
+# LiteLLM configuration
+Environment="LITELLM_MASTER_KEY=sk-local-llm-master"
+
+ExecStart=/home/ztaylor/.nix-profile/bin/litellm \
+    --config /home/ztaylor/workspaces/local-llama/configs/litellm-config.yaml \
+    --port 4000 \
+    --host 0.0.0.0
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=litellm-proxy
+
+[Install]
+WantedBy=multi-user.target
