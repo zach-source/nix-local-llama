@@ -1,0 +1,201 @@
+# AI Gateway Multi-Backend Configuration
+# Routes requests to different llama.cpp backends based on model name
+#
+# Architecture:
+#   Port 1975 (AI Gateway) → Routes to:
+#     model: *embed*     → localhost:8001 (Qwen3-Embed)
+#     model: *rerank*    → localhost:8002 (BGE-Reranker)
+#     model: * (default) → localhost:8000 (Qwen3-Coder Chat)
+#
+# Usage: aigw run configs/aigw-config.yaml
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: aigw-local
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: aigw-local
+  namespace: default
+spec:
+  gatewayClassName: aigw-local
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 1975
+---
+# Backend for Chat/Completions - Qwen3-Coder on port 8000
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: llama-chat
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: host.docker.internal
+        port: 8000
+---
+# Backend for Embeddings - Qwen3-Embed on port 8001
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: llama-embed
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: host.docker.internal
+        port: 8001
+---
+# Backend for Reranking - BGE-Reranker on port 8002
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: llama-rerank
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: host.docker.internal
+        port: 8002
+---
+# AI Service Backend - Chat
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: chat-backend
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+  backendRef:
+    group: gateway.envoyproxy.io
+    kind: Backend
+    name: llama-chat
+---
+# AI Service Backend - Embeddings
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: embed-backend
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+  backendRef:
+    group: gateway.envoyproxy.io
+    kind: Backend
+    name: llama-embed
+---
+# AI Service Backend - Reranker
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: rerank-backend
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+  backendRef:
+    group: gateway.envoyproxy.io
+    kind: Backend
+    name: llama-rerank
+---
+# AI Gateway Route with model-based routing
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: aigw-local
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+  targetRefs:
+    - name: aigw-local
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    # Embedding models route to embed backend
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: text-embedding-ada-002
+      backendRefs:
+        - name: embed-backend
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: text-embedding-3-small
+      backendRefs:
+        - name: embed-backend
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: text-embedding-3-large
+      backendRefs:
+        - name: embed-backend
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen3-embed
+      backendRefs:
+        - name: embed-backend
+    # Reranker models
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: bge-reranker
+      backendRefs:
+        - name: rerank-backend
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: rerank
+      backendRefs:
+        - name: rerank-backend
+    # Default - all other models go to chat
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen3-coder
+      backendRefs:
+        - name: chat-backend
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: gpt-4
+      backendRefs:
+        - name: chat-backend
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: gpt-4o
+      backendRefs:
+        - name: chat-backend
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: gpt-3.5-turbo
+      backendRefs:
+        - name: chat-backend
+  # Track token usage
+  llmRequestCosts:
+    - metadataKey: llm_input_token
+      type: InputToken
+    - metadataKey: llm_output_token
+      type: OutputToken
