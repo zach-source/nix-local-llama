@@ -442,6 +442,88 @@
           exec litellm --config "$CONFIG_FILE" --port "$PORT"
         '';
 
+        # Open WebUI deployment script
+        webuiScript = pkgs.writeShellScriptBin "llama-webui" ''
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          CONTAINER_NAME="open-webui"
+          IMAGE="ghcr.io/open-webui/open-webui:main"
+          WEBUI_PORT="${"$"}{WEBUI_PORT:-3000}"
+          LITELLM_URL="${"$"}{LITELLM_URL:-http://localhost:${toString defaultConfig.proxy.port}/v1}"
+          LITELLM_KEY="${"$"}{LITELLM_KEY:-sk-local-llm-master}"
+
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          BLUE='\033[0;34m'
+          NC='\033[0m'
+
+          log_info() { echo -e "${"$"}{BLUE}[INFO]${"$"}{NC} $1"; }
+          log_success() { echo -e "${"$"}{GREEN}[OK]${"$"}{NC} $1"; }
+          log_warn() { echo -e "${"$"}{YELLOW}[WARN]${"$"}{NC} $1"; }
+
+          check_docker() {
+              if ! command -v docker &>/dev/null; then
+                  echo "Docker is not installed"
+                  exit 1
+              fi
+          }
+
+          start_webui() {
+              check_docker
+              if docker ps --format '{{.Names}}' | grep -q "^${"$"}{CONTAINER_NAME}$"; then
+                  log_warn "Open WebUI is already running"
+                  echo "URL: http://localhost:${"$"}{WEBUI_PORT}"
+                  return 0
+              fi
+              docker rm "${"$"}{CONTAINER_NAME}" 2>/dev/null || true
+              log_info "Starting Open WebUI on port ${"$"}{WEBUI_PORT}..."
+              docker run -d --name "${"$"}{CONTAINER_NAME}" \
+                  --network host \
+                  -v open-webui-data:/app/backend/data \
+                  -e OPENAI_API_BASE_URL="${"$"}{LITELLM_URL}" \
+                  -e OPENAI_API_KEY="${"$"}{LITELLM_KEY}" \
+                  -e WEBUI_AUTH=false \
+                  -e PORT="${"$"}{WEBUI_PORT}" \
+                  --restart unless-stopped \
+                  "${"$"}{IMAGE}" >/dev/null
+              log_info "Waiting for startup..."
+              sleep 8
+              log_success "Open WebUI running at http://localhost:${"$"}{WEBUI_PORT}"
+          }
+
+          stop_webui() {
+              check_docker
+              if docker ps --format '{{.Names}}' | grep -q "^${"$"}{CONTAINER_NAME}$"; then
+                  log_info "Stopping Open WebUI..."
+                  docker stop "${"$"}{CONTAINER_NAME}" >/dev/null
+                  docker rm "${"$"}{CONTAINER_NAME}" >/dev/null
+                  log_success "Stopped"
+              else
+                  log_warn "Open WebUI is not running"
+              fi
+          }
+
+          show_status() {
+              check_docker
+              if docker ps --format '{{.Names}}' | grep -q "^${"$"}{CONTAINER_NAME}$"; then
+                  echo -e "Status: ${"$"}{GREEN}Running${"$"}{NC}"
+                  echo "URL: http://localhost:${"$"}{WEBUI_PORT}"
+              else
+                  echo -e "Status: ${"$"}{RED}Stopped${"$"}{NC}"
+              fi
+          }
+
+          case "${"$"}{1:-start}" in
+              start) start_webui ;;
+              stop) stop_webui ;;
+              status) show_status ;;
+              logs) docker logs -f "${"$"}{CONTAINER_NAME}" ;;
+              *) echo "Usage: $0 [start|stop|status|logs]"; exit 1 ;;
+          esac
+        '';
+
       in
       {
         # Development shell
@@ -476,9 +558,11 @@
             echo "  nix run .#install   - Install systemd services"
             echo "  nix run .#litellm   - Start LiteLLM AI proxy"
             echo "  nix run .#firewall  - Manage firewall rules (enable/disable/status)"
+            echo "  nix run .#webui     - Deploy Open WebUI chat interface (start/stop/status)"
             echo ""
             echo "Scripts:"
             echo "  ./scripts/firewall-update.sh [enable|disable|status]"
+            echo "  ./scripts/deploy-webui.sh [start|stop|status|logs|update]"
             echo ""
             echo "ROCm environment configured for ${defaultConfig.rocm.gpuTarget}"
 
@@ -493,6 +577,7 @@
           install-script = installScript;
           litellm-script = litellmScript;
           firewall-script = firewallScript;
+          webui-script = webuiScript;
           litellm-config = makeLiteLLMConfig defaultConfig;
 
           default = installScript;
@@ -513,6 +598,11 @@
           firewall = {
             type = "app";
             program = "${firewallScript}/bin/llama-firewall";
+          };
+
+          webui = {
+            type = "app";
+            program = "${webuiScript}/bin/llama-webui";
           };
 
           default = self.apps.${system}.install;

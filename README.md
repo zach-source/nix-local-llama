@@ -110,6 +110,7 @@ local-llama/
 │   ├── start-server.sh
 │   ├── start-litellm.sh   # LiteLLM proxy launcher
 │   ├── firewall-update.sh # Firewall rule management
+│   ├── deploy-webui.sh    # Open WebUI chat interface
 │   └── benchmark.sh
 ├── configs/               # Model and server configurations
 │   ├── models.yaml
@@ -168,10 +169,39 @@ Supports UFW (Ubuntu/Debian), firewalld (Fedora/RHEL), and iptables fallback.
 
 | Port | Service | Description |
 |------|---------|-------------|
+| 3000 | Open WebUI | Chat interface (optional) |
 | 4000 | LiteLLM Proxy | Main API gateway (chat) |
 | 8000 | Chat Model | Qwen3-Coder backend |
 | 8001 | Embeddings | Qwen3-Embed backend |
 | 8002 | Reranker | BGE-Reranker backend |
+
+## Chat Interface (Open WebUI)
+
+Optional ChatGPT-like web interface for interacting with your local LLM:
+
+```bash
+# Using Nix flake
+nix run .#webui start    # Start Open WebUI on port 3000
+nix run .#webui stop     # Stop the container
+nix run .#webui status   # Show container status
+nix run .#webui logs     # Follow container logs
+nix run .#webui update   # Pull latest image and restart
+
+# Using script directly
+./scripts/deploy-webui.sh start
+./scripts/deploy-webui.sh status
+```
+
+Access the interface at: http://localhost:3000
+
+**Requirements**: Docker must be installed and running.
+
+**Environment Variables**:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEBUI_PORT` | 3000 | Web interface port |
+| `LITELLM_URL` | http://localhost:4000/v1 | LiteLLM API endpoint |
+| `LITELLM_KEY` | sk-local-llm-master | API key for LiteLLM |
 
 ## Models
 
