@@ -50,6 +50,12 @@
           port = 4000; # LiteLLM default port
           tlsPort = 8443;
         };
+
+        # Envoy gateway configuration
+        envoy = {
+          port = 4001; # Unified gateway port
+          adminPort = 9901;
+        };
       };
     in
     flake-utils.lib.eachSystem supportedSystems (
@@ -59,6 +65,9 @@
           inherit system;
           config.allowUnfree = true;
         };
+
+        # Import the unified LLM configuration module
+        llmConfig = import ./nix/llm-config.nix { inherit pkgs; };
 
         # ROCm environment variables
         rocmEnv = {
@@ -245,14 +254,16 @@
           set -euo pipefail
 
           # Configuration
+          ENVOY_PORT="${"$"}{ENVOY_PORT:-${toString defaultConfig.envoy.port}}"
           LITELLM_PORT="${"$"}{LITELLM_PORT:-${toString defaultConfig.proxy.port}}"
           CHAT_PORT="${"$"}{CHAT_PORT:-${toString defaultConfig.models.chat.port}}"
           EMBED_PORT="${"$"}{EMBED_PORT:-${toString defaultConfig.models.embed.port}}"
           RERANK_PORT="${"$"}{RERANK_PORT:-${toString defaultConfig.models.rerank.port}}"
 
-          PORTS=("$LITELLM_PORT" "$CHAT_PORT" "$EMBED_PORT" "$RERANK_PORT")
+          PORTS=("$ENVOY_PORT" "$LITELLM_PORT" "$CHAT_PORT" "$EMBED_PORT" "$RERANK_PORT")
 
           declare -A PORT_NAMES=(
+              ["$ENVOY_PORT"]="Envoy-Gateway"
               ["$LITELLM_PORT"]="LiteLLM-Proxy"
               ["$CHAT_PORT"]="LLaMA-Chat"
               ["$EMBED_PORT"]="LLaMA-Embed"
@@ -524,6 +535,530 @@
           esac
         '';
 
+        # Generate Envoy configuration
+        makeEnvoyConfig =
+          cfg:
+          pkgs.writeText "envoy.yaml" ''
+            # Envoy Proxy Configuration for Local LLM Infrastructure
+            # Provides unified API gateway routing to multiple LLM backends
+            #
+            # Architecture:
+            #   Port ${toString cfg.envoy.port} (Envoy) → Routes to:
+            #     /v1/embeddings  → localhost:${toString cfg.models.embed.port} (${cfg.models.embed.name})
+            #     /v1/rerank      → localhost:${toString cfg.models.rerank.port} (${cfg.models.rerank.name})
+            #     /v1/chat/*      → localhost:${toString cfg.models.chat.port} (${cfg.models.chat.name})
+            #     /v1/completions → localhost:${toString cfg.models.chat.port} (${cfg.models.chat.name})
+            #     /health         → localhost:${toString cfg.models.chat.port} (health check)
+            #
+            # Start with: nix run .#envoy
+
+            admin:
+              address:
+                socket_address:
+                  address: 127.0.0.1
+                  port_value: ${toString cfg.envoy.adminPort}
+
+            static_resources:
+              listeners:
+              - name: llm_gateway
+                address:
+                  socket_address:
+                    address: 0.0.0.0
+                    port_value: ${toString cfg.envoy.port}
+                filter_chains:
+                - filters:
+                  - name: envoy.filters.network.http_connection_manager
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                      stat_prefix: llm_gateway
+                      codec_type: AUTO
+
+                      # Increase timeouts for LLM inference (can be slow)
+                      stream_idle_timeout: 600s
+                      request_timeout: 600s
+
+                      access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+
+                      http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+                      route_config:
+                        name: llm_routes
+                        virtual_hosts:
+                        - name: llm_services
+                          domains: ["*"]
+                          routes:
+                          # Embeddings → embed backend
+                          - match:
+                              prefix: "/v1/embeddings"
+                            route:
+                              cluster: llama_embed
+                              timeout: 120s
+
+                          # Reranking → rerank backend
+                          - match:
+                              prefix: "/v1/rerank"
+                            route:
+                              cluster: llama_rerank
+                              timeout: 60s
+
+                          # Alternate rerank endpoint
+                          - match:
+                              prefix: "/rerank"
+                            route:
+                              cluster: llama_rerank
+                              timeout: 60s
+
+                          # Chat/Completions → chat backend
+                          - match:
+                              prefix: "/v1/chat"
+                            route:
+                              cluster: llama_chat
+                              timeout: 600s
+
+                          # Completions (non-chat)
+                          - match:
+                              prefix: "/v1/completions"
+                            route:
+                              cluster: llama_chat
+                              timeout: 600s
+
+                          # Models list
+                          - match:
+                              prefix: "/v1/models"
+                            route:
+                              cluster: llama_chat
+                              timeout: 10s
+
+                          # Health checks
+                          - match:
+                              prefix: "/health"
+                            route:
+                              cluster: llama_chat
+                              timeout: 5s
+
+                          # Default catch-all
+                          - match:
+                              prefix: "/"
+                            route:
+                              cluster: llama_chat
+                              timeout: 600s
+
+              clusters:
+              # Chat/completions backend
+              - name: llama_chat
+                type: STATIC
+                connect_timeout: 5s
+                lb_policy: ROUND_ROBIN
+                load_assignment:
+                  cluster_name: llama_chat
+                  endpoints:
+                  - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: 127.0.0.1
+                            port_value: ${toString cfg.models.chat.port}
+
+              # Embedding model backend
+              - name: llama_embed
+                type: STATIC
+                connect_timeout: 5s
+                lb_policy: ROUND_ROBIN
+                load_assignment:
+                  cluster_name: llama_embed
+                  endpoints:
+                  - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: 127.0.0.1
+                            port_value: ${toString cfg.models.embed.port}
+
+              # Reranking model backend
+              - name: llama_rerank
+                type: STATIC
+                connect_timeout: 5s
+                lb_policy: ROUND_ROBIN
+                load_assignment:
+                  cluster_name: llama_rerank
+                  endpoints:
+                  - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: 127.0.0.1
+                            port_value: ${toString cfg.models.rerank.port}
+          '';
+
+        # Envoy gateway start script
+        envoyScript = pkgs.writeShellScriptBin "llama-envoy" ''
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          CONTAINER_NAME="envoy-llm"
+          IMAGE="envoyproxy/envoy:v1.32-latest"
+          ENVOY_PORT="${"$"}{ENVOY_PORT:-${toString defaultConfig.envoy.port}}"
+          ADMIN_PORT="${"$"}{ADMIN_PORT:-${toString defaultConfig.envoy.adminPort}}"
+          CONFIG_FILE="${"$"}{CONFIG_FILE:-configs/envoy.yaml}"
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+          # Detect if running from flake or project directory
+          if [[ -f "$CONFIG_FILE" ]]; then
+              CONFIG_PATH="$(realpath "$CONFIG_FILE")"
+          elif [[ -f "$SCRIPT_DIR/../configs/envoy.yaml" ]]; then
+              CONFIG_PATH="$(realpath "$SCRIPT_DIR/../configs/envoy.yaml")"
+          else
+              echo "Error: Cannot find envoy.yaml config file"
+              echo "Expected at: $CONFIG_FILE or $SCRIPT_DIR/../configs/envoy.yaml"
+              exit 1
+          fi
+
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          BLUE='\033[0;34m'
+          NC='\033[0m'
+
+          log_info() { echo -e "${"$"}{BLUE}[INFO]${"$"}{NC} $1"; }
+          log_success() { echo -e "${"$"}{GREEN}[OK]${"$"}{NC} $1"; }
+          log_warn() { echo -e "${"$"}{YELLOW}[WARN]${"$"}{NC} $1"; }
+          log_error() { echo -e "${"$"}{RED}[ERROR]${"$"}{NC} $1"; }
+
+          check_docker() {
+              if ! command -v docker &>/dev/null; then
+                  log_error "Docker is not installed"
+                  exit 1
+              fi
+          }
+
+          start_envoy() {
+              check_docker
+
+              if docker ps --format '{{.Names}}' | grep -q "^${"$"}{CONTAINER_NAME}$"; then
+                  log_warn "Envoy gateway is already running"
+                  show_endpoints
+                  return 0
+              fi
+
+              # Clean up any stopped container
+              docker rm "${"$"}{CONTAINER_NAME}" 2>/dev/null || true
+
+              log_info "Starting Envoy LLM gateway..."
+              log_info "Config: $CONFIG_PATH"
+
+              docker run -d --rm \
+                  --name "${"$"}{CONTAINER_NAME}" \
+                  --network host \
+                  --user root \
+                  -v "${"$"}{CONFIG_PATH}":/etc/envoy/envoy.yaml:ro \
+                  "${"$"}{IMAGE}" \
+                  -c /etc/envoy/envoy.yaml >/dev/null
+
+              sleep 2
+
+              # Verify startup
+              if curl -s "http://localhost:${"$"}{ADMIN_PORT}/ready" | grep -q "LIVE"; then
+                  log_success "Envoy gateway started successfully"
+                  show_endpoints
+              else
+                  log_error "Envoy failed to start. Check logs with: $0 logs"
+                  exit 1
+              fi
+          }
+
+          stop_envoy() {
+              check_docker
+              if docker ps --format '{{.Names}}' | grep -q "^${"$"}{CONTAINER_NAME}$"; then
+                  log_info "Stopping Envoy gateway..."
+                  docker stop "${"$"}{CONTAINER_NAME}" >/dev/null
+                  log_success "Stopped"
+              else
+                  log_warn "Envoy gateway is not running"
+              fi
+          }
+
+          show_status() {
+              check_docker
+              if docker ps --format '{{.Names}}' | grep -q "^${"$"}{CONTAINER_NAME}$"; then
+                  echo -e "Status: ${"$"}{GREEN}Running${"$"}{NC}"
+                  show_endpoints
+                  echo ""
+                  log_info "Admin: http://localhost:${"$"}{ADMIN_PORT}"
+              else
+                  echo -e "Status: ${"$"}{RED}Stopped${"$"}{NC}"
+              fi
+          }
+
+          show_endpoints() {
+              echo ""
+              log_info "Unified LLM Gateway: http://localhost:${"$"}{ENVOY_PORT}"
+              echo "  Routes:"
+              echo "    /v1/chat/completions  → Chat (port ${toString defaultConfig.models.chat.port})"
+              echo "    /v1/embeddings        → Embeddings (port ${toString defaultConfig.models.embed.port})"
+              echo "    /v1/rerank            → Reranker (port ${toString defaultConfig.models.rerank.port})"
+              echo "    /health               → Health check"
+          }
+
+          test_endpoints() {
+              log_info "Testing Envoy gateway endpoints..."
+              echo ""
+
+              # Health
+              echo -n "  Health:     "
+              if curl -s "http://localhost:${"$"}{ENVOY_PORT}/health" | grep -q "ok"; then
+                  echo -e "${"$"}{GREEN}OK${"$"}{NC}"
+              else
+                  echo -e "${"$"}{RED}FAIL${"$"}{NC}"
+              fi
+
+              # Chat
+              echo -n "  Chat:       "
+              if curl -s "http://localhost:${"$"}{ENVOY_PORT}/v1/models" | grep -q "model"; then
+                  echo -e "${"$"}{GREEN}OK${"$"}{NC}"
+              else
+                  echo -e "${"$"}{YELLOW}Backend not running${"$"}{NC}"
+              fi
+
+              # Embeddings
+              echo -n "  Embeddings: "
+              if curl -s "http://localhost:${toString defaultConfig.models.embed.port}/health" | grep -q "ok"; then
+                  echo -e "${"$"}{GREEN}OK${"$"}{NC}"
+              else
+                  echo -e "${"$"}{YELLOW}Backend not running${"$"}{NC}"
+              fi
+
+              # Rerank
+              echo -n "  Reranker:   "
+              if curl -s "http://localhost:${toString defaultConfig.models.rerank.port}/health" | grep -q "ok"; then
+                  echo -e "${"$"}{GREEN}OK${"$"}{NC}"
+              else
+                  echo -e "${"$"}{YELLOW}Backend not running${"$"}{NC}"
+              fi
+          }
+
+          case "${"$"}{1:-start}" in
+              start) start_envoy ;;
+              stop) stop_envoy ;;
+              restart) stop_envoy; sleep 1; start_envoy ;;
+              status) show_status ;;
+              test) test_endpoints ;;
+              logs) docker logs -f "${"$"}{CONTAINER_NAME}" ;;
+              *)
+                  echo "Envoy LLM Gateway Manager"
+                  echo ""
+                  echo "Usage: $0 [command]"
+                  echo ""
+                  echo "Commands:"
+                  echo "  start    Start the Envoy gateway (default)"
+                  echo "  stop     Stop the Envoy gateway"
+                  echo "  restart  Restart the Envoy gateway"
+                  echo "  status   Show gateway status and endpoints"
+                  echo "  test     Test all backend endpoints"
+                  echo "  logs     Follow container logs"
+                  echo ""
+                  echo "Environment:"
+                  echo "  ENVOY_PORT   Gateway port (default: ${toString defaultConfig.envoy.port})"
+                  echo "  ADMIN_PORT   Admin port (default: ${toString defaultConfig.envoy.adminPort})"
+                  echo "  CONFIG_FILE  Config path (default: configs/envoy.yaml)"
+                  exit 1
+                  ;;
+          esac
+        '';
+
+        # Config generation script using llm-config.nix
+        generateConfigsScript = pkgs.writeShellScriptBin "llama-generate-configs" ''
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          BLUE='\033[0;34m'
+          NC='\033[0m'
+
+          log_info() { echo -e "${"$"}{BLUE}[INFO]${"$"}{NC} $1"; }
+          log_success() { echo -e "${"$"}{GREEN}[OK]${"$"}{NC} $1"; }
+          log_warn() { echo -e "${"$"}{YELLOW}[WARN]${"$"}{NC} $1"; }
+
+          OUTPUT_DIR="${"$"}{OUTPUT_DIR:-configs/generated}"
+          INSTALL_DIR="${"$"}{INSTALL_DIR:-/etc/llama-server}"
+
+          show_config() {
+              log_info "Current LLM Configuration:"
+              echo ""
+              echo "  Hardware:  ${llmConfig.activeConfig.hardware.name}"
+              echo "  GPU Arch:  ${llmConfig.activeConfig.hardware.gpuArch or "N/A"}"
+              echo ""
+              echo "  Services:"
+              echo "    Chat:      ${llmConfig.activeConfig.services.chat.model.displayName} (port ${toString llmConfig.activeConfig.services.chat.endpoint.port})"
+              echo "    Embedding: ${llmConfig.activeConfig.services.embedding.model.displayName} (port ${toString llmConfig.activeConfig.services.embedding.endpoint.port})"
+              echo "    Reranking: ${llmConfig.activeConfig.services.reranking.model.displayName} (port ${toString llmConfig.activeConfig.services.reranking.endpoint.port})"
+              echo ""
+              echo "  Gateway:   http://localhost:${toString llmConfig.activeConfig.gateway.port}"
+              echo ""
+              echo "  OpenAI Aliases:"
+              echo "    Chat:       ${
+                builtins.concatStringsSep ", " (
+                  llmConfig.activeConfig.services.chat.endpoint.aliases
+                  ++ llmConfig.activeConfig.services.chat.modelAliases
+                )
+              }"
+              echo "    Embeddings: ${
+                builtins.concatStringsSep ", " (
+                  llmConfig.activeConfig.services.embedding.endpoint.aliases
+                  ++ llmConfig.activeConfig.services.embedding.modelAliases
+                )
+              }"
+              echo "    Reranking:  ${
+                builtins.concatStringsSep ", " (
+                  llmConfig.activeConfig.services.reranking.endpoint.aliases
+                  ++ llmConfig.activeConfig.services.reranking.modelAliases
+                )
+              }"
+          }
+
+          generate_configs() {
+              log_info "Generating configurations to $OUTPUT_DIR"
+              mkdir -p "$OUTPUT_DIR"
+
+              # Server configs
+              log_info "Generating server configs..."
+              cat > "$OUTPUT_DIR/chat.conf" << 'CONF'
+          ${llmConfig.serverConfigs.chat}
+          CONF
+              log_success "chat.conf"
+
+              cat > "$OUTPUT_DIR/embedding.conf" << 'CONF'
+          ${llmConfig.serverConfigs.embedding}
+          CONF
+              log_success "embedding.conf"
+
+              cat > "$OUTPUT_DIR/reranking.conf" << 'CONF'
+          ${llmConfig.serverConfigs.reranking}
+          CONF
+              log_success "reranking.conf"
+
+              # Envoy config
+              log_info "Generating Envoy gateway config..."
+              cat > "$OUTPUT_DIR/envoy.yaml" << 'YAML'
+          ${llmConfig.envoyConfig}
+          YAML
+              log_success "envoy.yaml"
+
+              # LiteLLM config
+              log_info "Generating LiteLLM config..."
+              cat > "$OUTPUT_DIR/litellm-config.yaml" << 'YAML'
+          ${llmConfig.litellmConfig}
+          YAML
+              log_success "litellm-config.yaml"
+
+              # Systemd services
+              log_info "Generating systemd services..."
+              cat > "$OUTPUT_DIR/llama-server-chat.service" << 'SERVICE'
+          ${llmConfig.systemdServices.chat}
+          SERVICE
+              log_success "llama-server-chat.service"
+
+              cat > "$OUTPUT_DIR/llama-server-embedding.service" << 'SERVICE'
+          ${llmConfig.systemdServices.embedding}
+          SERVICE
+              log_success "llama-server-embedding.service"
+
+              cat > "$OUTPUT_DIR/llama-server-reranking.service" << 'SERVICE'
+          ${llmConfig.systemdServices.reranking}
+          SERVICE
+              log_success "llama-server-reranking.service"
+
+              # Documentation
+              log_info "Generating documentation..."
+              cat > "$OUTPUT_DIR/CONFIGURATION.md" << 'MD'
+          ${llmConfig.documentation}
+          MD
+              log_success "CONFIGURATION.md"
+
+              echo ""
+              log_success "All configs generated in $OUTPUT_DIR"
+              echo ""
+              echo "Files generated:"
+              ls -la "$OUTPUT_DIR"
+          }
+
+          install_configs() {
+              log_info "Installing configurations..."
+
+              if [[ ! -d "$OUTPUT_DIR" ]]; then
+                  log_warn "No generated configs found. Running generate first..."
+                  generate_configs
+              fi
+
+              log_info "Installing server configs to $INSTALL_DIR"
+              sudo mkdir -p "$INSTALL_DIR"
+              sudo cp "$OUTPUT_DIR"/*.conf "$INSTALL_DIR/" 2>/dev/null || true
+              log_success "Server configs installed"
+
+              log_info "Installing Envoy config to configs/"
+              cp "$OUTPUT_DIR/envoy.yaml" configs/envoy.yaml
+              log_success "Envoy config updated"
+
+              log_info "Installing LiteLLM config to configs/"
+              cp "$OUTPUT_DIR/litellm-config.yaml" configs/litellm-config.yaml
+              log_success "LiteLLM config updated"
+
+              log_info "Installing systemd services..."
+              sudo cp "$OUTPUT_DIR"/*.service /etc/systemd/system/ 2>/dev/null || true
+              sudo systemctl daemon-reload
+              log_success "Systemd services installed"
+
+              echo ""
+              log_success "Installation complete!"
+              echo ""
+              echo "Start services with:"
+              echo "  sudo systemctl start llama-server-chat"
+              echo "  sudo systemctl start llama-server-embedding"
+              echo "  sudo systemctl start llama-server-reranking"
+              echo "  nix run .#envoy start"
+          }
+
+          case "${"$"}{1:-show}" in
+              show|info)
+                  show_config
+                  ;;
+              generate|gen)
+                  generate_configs
+                  ;;
+              install)
+                  install_configs
+                  ;;
+              all)
+                  show_config
+                  echo ""
+                  generate_configs
+                  ;;
+              *)
+                  echo "LLM Configuration Generator"
+                  echo ""
+                  echo "Usage: $0 [command]"
+                  echo ""
+                  echo "Commands:"
+                  echo "  show      Show current configuration (default)"
+                  echo "  generate  Generate all config files to configs/generated/"
+                  echo "  install   Install configs to system locations"
+                  echo "  all       Show config and generate files"
+                  echo ""
+                  echo "Environment:"
+                  echo "  OUTPUT_DIR   Output directory (default: configs/generated)"
+                  echo "  INSTALL_DIR  System config dir (default: /etc/llama-server)"
+                  exit 1
+                  ;;
+          esac
+        '';
+
       in
       {
         # Development shell
@@ -555,14 +1090,18 @@
             echo "Local LLama Development Environment"
             echo ""
             echo "Available commands:"
-            echo "  nix run .#install   - Install systemd services"
-            echo "  nix run .#litellm   - Start LiteLLM AI proxy"
-            echo "  nix run .#firewall  - Manage firewall rules (enable/disable/status)"
-            echo "  nix run .#webui     - Deploy Open WebUI chat interface (start/stop/status)"
+            echo "  nix run .#generate-configs  - Generate/show LLM configurations"
+            echo "  nix run .#envoy             - Start Envoy LLM gateway (start/stop/status/test)"
+            echo "  nix run .#install           - Install systemd services"
+            echo "  nix run .#litellm           - Start LiteLLM AI proxy"
+            echo "  nix run .#firewall          - Manage firewall rules (enable/disable/status)"
+            echo "  nix run .#webui             - Deploy Open WebUI chat interface (start/stop/status)"
             echo ""
-            echo "Scripts:"
-            echo "  ./scripts/firewall-update.sh [enable|disable|status]"
-            echo "  ./scripts/deploy-webui.sh [start|stop|status|logs|update]"
+            echo "Active Configuration (from nix/llm-config.nix):"
+            echo "  Chat:      ${llmConfig.activeConfig.services.chat.model.displayName} (port ${toString llmConfig.activeConfig.services.chat.endpoint.port})"
+            echo "  Embedding: ${llmConfig.activeConfig.services.embedding.model.displayName} (port ${toString llmConfig.activeConfig.services.embedding.endpoint.port})"
+            echo "  Reranking: ${llmConfig.activeConfig.services.reranking.model.displayName} (port ${toString llmConfig.activeConfig.services.reranking.endpoint.port})"
+            echo "  Gateway:   http://localhost:${toString llmConfig.activeConfig.gateway.port}"
             echo ""
             echo "ROCm environment configured for ${defaultConfig.rocm.gpuTarget}"
 
@@ -578,7 +1117,15 @@
           litellm-script = litellmScript;
           firewall-script = firewallScript;
           webui-script = webuiScript;
+          envoy-script = envoyScript;
+          generate-configs-script = generateConfigsScript;
           litellm-config = makeLiteLLMConfig defaultConfig;
+          envoy-config = makeEnvoyConfig defaultConfig;
+
+          # Configs from llm-config.nix module
+          llm-envoy-config = llmConfig.packages.envoyConfigFile;
+          llm-litellm-config = llmConfig.packages.litellmConfigFile;
+          llm-documentation = llmConfig.packages.documentationFile;
 
           default = installScript;
         };
@@ -603,6 +1150,16 @@
           webui = {
             type = "app";
             program = "${webuiScript}/bin/llama-webui";
+          };
+
+          envoy = {
+            type = "app";
+            program = "${envoyScript}/bin/llama-envoy";
+          };
+
+          generate-configs = {
+            type = "app";
+            program = "${generateConfigsScript}/bin/llama-generate-configs";
           };
 
           default = self.apps.${system}.install;
