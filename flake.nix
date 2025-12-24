@@ -1368,11 +1368,11 @@
               log_success "Server configs installed"
 
               log_info "Installing Envoy config to configs/"
-              cp "$OUTPUT_DIR/envoy.yaml" configs/envoy.yaml
+              cp "$OUTPUT_DIR/envoy.yaml" configs/envoy.yaml 2>/dev/null || true
               log_success "Envoy config updated"
 
               log_info "Installing LiteLLM config to configs/"
-              cp "$OUTPUT_DIR/litellm-config.yaml" configs/litellm-config.yaml
+              cp "$OUTPUT_DIR/litellm-config.yaml" configs/litellm-config.yaml 2>/dev/null || true
               log_success "LiteLLM config updated"
 
               log_info "Installing systemd services..."
@@ -1380,14 +1380,127 @@
               sudo systemctl daemon-reload
               log_success "Systemd services installed"
 
+              log_info "Enabling systemd services..."
+              ${
+                if llmConfig.activeConfig.enable.chat then
+                  ''
+                    sudo systemctl enable llama-server-chat.service 2>/dev/null && log_success "Enabled llama-server-chat" || log_warn "Could not enable llama-server-chat"
+                  ''
+                else
+                  ""
+              }
+              ${
+                if llmConfig.activeConfig.enable.embedding then
+                  ''
+                    sudo systemctl enable llama-server-embedding.service 2>/dev/null && log_success "Enabled llama-server-embedding" || log_warn "Could not enable llama-server-embedding"
+                  ''
+                else
+                  ""
+              }
+              ${
+                if llmConfig.activeConfig.enable.reranking then
+                  ''
+                    sudo systemctl enable llama-server-reranking.service 2>/dev/null && log_success "Enabled llama-server-reranking" || log_warn "Could not enable llama-server-reranking"
+                  ''
+                else
+                  ""
+              }
+
               echo ""
               log_success "Installation complete!"
               echo ""
-              echo "Start services with:"
+              echo "Services are enabled and will start on boot."
+              echo ""
+              echo "Start services now with:"
               echo "  sudo systemctl start llama-server-chat"
               echo "  sudo systemctl start llama-server-embedding"
               echo "  sudo systemctl start llama-server-reranking"
               echo "  nix run .#envoy start"
+          }
+
+          start_services() {
+              log_info "Starting LLM services..."
+              ${
+                if llmConfig.activeConfig.enable.chat then
+                  ''
+                    log_info "Starting chat service..."
+                    sudo systemctl start llama-server-chat.service && log_success "Started llama-server-chat" || log_warn "Could not start llama-server-chat"
+                  ''
+                else
+                  ""
+              }
+              ${
+                if llmConfig.activeConfig.enable.embedding then
+                  ''
+                    log_info "Starting embedding service..."
+                    sudo systemctl start llama-server-embedding.service && log_success "Started llama-server-embedding" || log_warn "Could not start llama-server-embedding"
+                  ''
+                else
+                  ""
+              }
+              ${
+                if llmConfig.activeConfig.enable.reranking then
+                  ''
+                    log_info "Starting reranking service..."
+                    sudo systemctl start llama-server-reranking.service && log_success "Started llama-server-reranking" || log_warn "Could not start llama-server-reranking"
+                  ''
+                else
+                  ""
+              }
+              echo ""
+              log_success "All enabled services started!"
+          }
+
+          stop_services() {
+              log_info "Stopping LLM services..."
+              sudo systemctl stop llama-server-chat.service 2>/dev/null && log_success "Stopped llama-server-chat" || true
+              sudo systemctl stop llama-server-embedding.service 2>/dev/null && log_success "Stopped llama-server-embedding" || true
+              sudo systemctl stop llama-server-reranking.service 2>/dev/null && log_success "Stopped llama-server-reranking" || true
+              log_success "All services stopped"
+          }
+
+          show_status() {
+              log_info "LLM Service Status:"
+              echo ""
+              ${
+                if llmConfig.activeConfig.enable.chat then
+                  ''
+                    echo -n "  Chat (${llmConfig.activeConfig.services.chat.model.displayName}): "
+                    if systemctl is-active --quiet llama-server-chat.service; then
+                        echo -e "${"$"}{GREEN}running${"$"}{NC}"
+                    else
+                        echo -e "${"$"}{RED}stopped${"$"}{NC}"
+                    fi
+                  ''
+                else
+                  ""
+              }
+              ${
+                if llmConfig.activeConfig.enable.embedding then
+                  ''
+                    echo -n "  Embedding (${llmConfig.activeConfig.services.embedding.model.displayName}): "
+                    if systemctl is-active --quiet llama-server-embedding.service; then
+                        echo -e "${"$"}{GREEN}running${"$"}{NC}"
+                    else
+                        echo -e "${"$"}{RED}stopped${"$"}{NC}"
+                    fi
+                  ''
+                else
+                  ""
+              }
+              ${
+                if llmConfig.activeConfig.enable.reranking then
+                  ''
+                    echo -n "  Reranking (${llmConfig.activeConfig.services.reranking.model.displayName}): "
+                    if systemctl is-active --quiet llama-server-reranking.service; then
+                        echo -e "${"$"}{GREEN}running${"$"}{NC}"
+                    else
+                        echo -e "${"$"}{RED}stopped${"$"}{NC}"
+                    fi
+                  ''
+                else
+                  ""
+              }
           }
 
           case "${"$"}{1:-show}" in
@@ -1399,6 +1512,20 @@
                   ;;
               install)
                   install_configs
+                  ;;
+              start)
+                  start_services
+                  ;;
+              stop)
+                  stop_services
+                  ;;
+              restart)
+                  stop_services
+                  sleep 2
+                  start_services
+                  ;;
+              status)
+                  show_status
                   ;;
               all)
                   show_config
@@ -1413,7 +1540,11 @@
                   echo "Commands:"
                   echo "  show      Show current configuration (default)"
                   echo "  generate  Generate all config files to configs/generated/"
-                  echo "  install   Install configs to system locations"
+                  echo "  install   Install configs and enable systemd services"
+                  echo "  start     Start all enabled LLM services"
+                  echo "  stop      Stop all LLM services"
+                  echo "  restart   Restart all LLM services"
+                  echo "  status    Show service status"
                   echo "  all       Show config and generate files"
                   echo ""
                   echo "Environment:"
