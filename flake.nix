@@ -16,6 +16,14 @@
       # Supported systems (primarily Linux with ROCm)
       supportedSystems = [ "x86_64-linux" ];
 
+      # Default paths - can be overridden via environment
+      defaultPaths = {
+        modelsDir = "$HOME/models";
+        llamaCppDir = "$HOME/llama.cpp";
+        rocmPath = "/opt/rocm";
+        configDir = "/etc/llama-server";
+      };
+
       # Default configuration
       defaultConfig = {
         rocm = {
@@ -66,21 +74,26 @@
           config.allowUnfree = true;
         };
 
-        # Import the unified LLM configuration module
-        llmConfig = import ./nix/llm-config.nix { inherit pkgs; };
-
-        # ROCm environment variables
-        rocmEnv = {
-          HSA_OVERRIDE_GFX_VERSION = "11.5.1";
-          HIP_VISIBLE_DEVICES = "0";
-          GPU_MAX_HW_QUEUES = "8";
-          LD_LIBRARY_PATH = "/opt/rocm/lib:/usr/lib/x86_64-linux-gnu";
-          GGML_CUDA_ENABLE_UNIFIED_MEMORY = "1";
-          ROCBLAS_USE_HIPBLASLT = "1";
-          HSA_ENABLE_SDMA = "0";
-          GPU_MAX_HEAP_SIZE = "99";
-          GPU_MAX_ALLOC_PERCENT = "99";
+        # Import the unified LLM configuration module with all services enabled
+        llmConfig = import ./nix/llm-config.nix {
+          inherit pkgs;
+          # Paths read from environment or use defaults
+          modelsDir = builtins.getEnv "MODELS_DIR";
+          llamaCppDir = builtins.getEnv "LLAMA_DIR";
+          rocmPath = "/opt/rocm";
+          configDir = "/etc/llama-server";
+          # All services enabled by default
+          enableChat = true;
+          enableEmbedding = true;
+          enableReranking = true;
+          # Envoy enabled, AIGW optional
+          enableEnvoy = true;
+          enableAigw = false;
+          enableLitellm = false;
         };
+
+        # ROCm environment from llmConfig
+        rocmEnv = llmConfig.activeConfig.hardware.environment;
 
         # Generate systemd service for a model
         makeModelService =
@@ -535,6 +548,266 @@
           esac
         '';
 
+        # llama.cpp build helper script
+        buildLlamaScript = pkgs.writeShellScriptBin "llama-build" ''
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          LLAMA_DIR="${"$"}{LLAMA_DIR:-$HOME/llama.cpp}"
+          BUILD_TYPE="${"$"}{1:-rocm}"
+          GPU_TARGET="${"$"}{GPU_TARGET:-gfx1151}"
+          ROCM_PATH="${"$"}{ROCM_PATH:-/opt/rocm}"
+
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          BLUE='\033[0;34m'
+          NC='\033[0m'
+
+          log_info() { echo -e "${"$"}{BLUE}[INFO]${"$"}{NC} $1"; }
+          log_success() { echo -e "${"$"}{GREEN}[OK]${"$"}{NC} $1"; }
+          log_warn() { echo -e "${"$"}{YELLOW}[WARN]${"$"}{NC} $1"; }
+          log_error() { echo -e "${"$"}{RED}[ERROR]${"$"}{NC} $1"; }
+
+          clone_or_update() {
+              if [[ -d "$LLAMA_DIR" ]]; then
+                  log_info "Updating llama.cpp..."
+                  cd "$LLAMA_DIR"
+                  git fetch && git pull
+              else
+                  log_info "Cloning llama.cpp..."
+                  git clone https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
+                  cd "$LLAMA_DIR"
+              fi
+          }
+
+          build_rocm() {
+              local BUILD_DIR="$LLAMA_DIR/build-rocm"
+              log_info "Building llama.cpp with ROCm for $GPU_TARGET..."
+
+              # Check for rocWMMA
+              local ROCWMMA_FLAG=""
+              if [[ -f "$ROCM_PATH/include/rocwmma/rocwmma.hpp" ]]; then
+                  log_info "rocWMMA found, enabling flash attention"
+                  ROCWMMA_FLAG="-DGGML_HIP_ROCWMMA_FATTN=ON"
+              fi
+
+              rm -rf "$BUILD_DIR"
+              mkdir -p "$BUILD_DIR"
+              cd "$BUILD_DIR"
+
+              export HIPCXX="$($ROCM_PATH/bin/hipconfig -l)/clang"
+              export HIP_PATH="$($ROCM_PATH/bin/hipconfig -R)"
+
+              cmake .. \
+                  -DGGML_HIP=ON \
+                  -DAMDGPU_TARGETS="$GPU_TARGET" \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_PREFIX_PATH="$ROCM_PATH;/usr" \
+                  -DGGML_NATIVE=OFF \
+                  $ROCWMMA_FLAG
+
+              cmake --build . --config Release -j$(nproc)
+
+              log_success "ROCm build complete: $BUILD_DIR/bin/llama-server"
+          }
+
+          build_vulkan() {
+              local BUILD_DIR="$LLAMA_DIR/build-vulkan"
+              log_info "Building llama.cpp with Vulkan..."
+
+              rm -rf "$BUILD_DIR"
+              mkdir -p "$BUILD_DIR"
+              cd "$BUILD_DIR"
+
+              cmake .. \
+                  -DGGML_VULKAN=ON \
+                  -DCMAKE_BUILD_TYPE=Release
+
+              cmake --build . --config Release -j$(nproc)
+
+              log_success "Vulkan build complete: $BUILD_DIR/bin/llama-server"
+          }
+
+          build_cpu() {
+              local BUILD_DIR="$LLAMA_DIR/build-cpu"
+              log_info "Building llama.cpp (CPU only)..."
+
+              rm -rf "$BUILD_DIR"
+              mkdir -p "$BUILD_DIR"
+              cd "$BUILD_DIR"
+
+              cmake .. \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DGGML_NATIVE=ON
+
+              cmake --build . --config Release -j$(nproc)
+
+              log_success "CPU build complete: $BUILD_DIR/bin/llama-server"
+          }
+
+          show_help() {
+              echo "llama.cpp Build Helper"
+              echo ""
+              echo "Usage: $0 [build-type]"
+              echo ""
+              echo "Build types:"
+              echo "  rocm     Build with ROCm/HIP for AMD GPUs (default)"
+              echo "  vulkan   Build with Vulkan for cross-platform GPU"
+              echo "  cpu      Build CPU-only version"
+              echo "  update   Update llama.cpp source only"
+              echo ""
+              echo "Environment:"
+              echo "  LLAMA_DIR    llama.cpp directory (default: ~/llama.cpp)"
+              echo "  GPU_TARGET   GPU architecture (default: gfx1151)"
+              echo "  ROCM_PATH    ROCm installation path (default: /opt/rocm)"
+          }
+
+          main() {
+              case "$BUILD_TYPE" in
+                  rocm|uma)
+                      clone_or_update
+                      build_rocm
+                      ;;
+                  vulkan)
+                      clone_or_update
+                      build_vulkan
+                      ;;
+                  cpu)
+                      clone_or_update
+                      build_cpu
+                      ;;
+                  update)
+                      clone_or_update
+                      log_success "Source updated"
+                      ;;
+                  help|--help|-h)
+                      show_help
+                      ;;
+                  *)
+                      log_error "Unknown build type: $BUILD_TYPE"
+                      show_help
+                      exit 1
+                      ;;
+              esac
+          }
+
+          main
+        '';
+
+        # Model download helper script
+        downloadModelScript = pkgs.writeShellScriptBin "llama-download" ''
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          MODELS_DIR="${"$"}{MODELS_DIR:-$HOME/models}"
+
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          BLUE='\033[0;34m'
+          NC='\033[0m'
+
+          log_info() { echo -e "${"$"}{BLUE}[INFO]${"$"}{NC} $1"; }
+          log_success() { echo -e "${"$"}{GREEN}[OK]${"$"}{NC} $1"; }
+          log_warn() { echo -e "${"$"}{YELLOW}[WARN]${"$"}{NC} $1"; }
+
+          # Model definitions from llm-config.nix
+          declare -A MODELS=(
+              # Chat models
+              ["devstral2-123b"]="unsloth/Devstral-2-123B-Instruct-2512-GGUF:Devstral-2-123B-Instruct-2512-Q4_K_M.gguf"
+              ["devstral2-123b-q5"]="unsloth/Devstral-2-123B-Instruct-2512-GGUF:Devstral-2-123B-Instruct-2512-Q5_K_M.gguf"
+              ["devstral2-24b"]="unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF:Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf"
+              ["qwen3-coder-30b"]="Qwen/Qwen3-Coder-30B-A3B-Instruct-GGUF:Qwen3-Coder-30B-A3B-Instruct-Q6_K.gguf"
+              # Embedding models
+              ["qwen3-embed-8b"]="Qwen/Qwen3-Embedding-8B-GGUF:Qwen3-Embedding-8B-Q8_0.gguf"
+              ["nomic-embed"]="nomic-ai/nomic-embed-text-v1.5-GGUF:nomic-embed-text-v1.5-Q8_0.gguf"
+              # Reranking models
+              ["bge-reranker"]="BAAI/bge-reranker-v2-m3-GGUF:bge-reranker-v2-m3-Q8_0.gguf"
+          )
+
+          download_model() {
+              local key="$1"
+              local spec="${"$"}{MODELS[$key]:-}"
+
+              if [[ -z "$spec" ]]; then
+                  log_warn "Unknown model: $key"
+                  echo "Available models:"
+                  for m in "${"$"}{!MODELS[@]}"; do
+                      echo "  $m"
+                  done
+                  exit 1
+              fi
+
+              local repo="${"$"}{spec%%:*}"
+              local file="${"$"}{spec#*:}"
+
+              log_info "Downloading $file from $repo..."
+              mkdir -p "$MODELS_DIR"
+
+              if command -v huggingface-cli &>/dev/null; then
+                  huggingface-cli download "$repo" \
+                      --include "$file" \
+                      --local-dir "$MODELS_DIR"
+              else
+                  log_warn "huggingface-cli not found, using curl..."
+                  curl -L -o "$MODELS_DIR/$file" \
+                      "https://huggingface.co/$repo/resolve/main/$file"
+              fi
+
+              log_success "Downloaded to $MODELS_DIR/$file"
+          }
+
+          list_models() {
+              echo "Available models:"
+              echo ""
+              echo "Chat Models:"
+              echo "  devstral2-123b      Devstral-2-123B Q4_K_M (75GB) - Best for agentic coding"
+              echo "  devstral2-123b-q5   Devstral-2-123B Q5_K_M (88GB) - Higher quality"
+              echo "  devstral2-24b       Devstral-Small-2-24B Q8 (25GB) - Fast inference"
+              echo "  qwen3-coder-30b     Qwen3-Coder-30B-A3B Q6 (24GB) - MoE coding model"
+              echo ""
+              echo "Embedding Models:"
+              echo "  qwen3-embed-8b      Qwen3-Embedding-8B Q8 (8.5GB)"
+              echo "  nomic-embed         Nomic-Embed-Text-v1.5 Q8 (0.5GB)"
+              echo ""
+              echo "Reranking Models:"
+              echo "  bge-reranker        BGE-Reranker-v2-m3 Q8 (1.2GB)"
+          }
+
+          list_installed() {
+              log_info "Installed models in $MODELS_DIR:"
+              if [[ -d "$MODELS_DIR" ]]; then
+                  ls -lh "$MODELS_DIR"/*.gguf 2>/dev/null || echo "  No GGUF models found"
+              else
+                  echo "  Models directory not found"
+              fi
+          }
+
+          download_stack() {
+              log_info "Downloading recommended model stack..."
+              download_model "devstral2-123b"
+              download_model "qwen3-embed-8b"
+              download_model "bge-reranker"
+              log_success "All models downloaded!"
+          }
+
+          case "${"$"}{1:-list}" in
+              list)
+                  list_models
+                  ;;
+              installed|ls)
+                  list_installed
+                  ;;
+              stack|all)
+                  download_stack
+                  ;;
+              *)
+                  download_model "$1"
+                  ;;
+          esac
+        '';
+
         # Generate Envoy configuration
         makeEnvoyConfig =
           cfg:
@@ -927,53 +1200,129 @@
               log_info "Generating configurations to $OUTPUT_DIR"
               mkdir -p "$OUTPUT_DIR"
 
-              # Server configs
+              # Server configs (only for enabled services)
               log_info "Generating server configs..."
-              cat > "$OUTPUT_DIR/chat.conf" << 'CONF'
-          ${llmConfig.serverConfigs.chat}
-          CONF
-              log_success "chat.conf"
+              ${
+                if llmConfig.activeConfig.enable.chat then
+                  ''
+                        cat > "$OUTPUT_DIR/chat.conf" << 'CONF'
+                    ${llmConfig.serverConfigs.chat}
+                    CONF
+                        log_success "chat.conf"
+                  ''
+                else
+                  ''
+                    log_warn "chat service disabled, skipping"
+                  ''
+              }
 
-              cat > "$OUTPUT_DIR/embedding.conf" << 'CONF'
-          ${llmConfig.serverConfigs.embedding}
-          CONF
-              log_success "embedding.conf"
+              ${
+                if llmConfig.activeConfig.enable.embedding then
+                  ''
+                        cat > "$OUTPUT_DIR/embedding.conf" << 'CONF'
+                    ${llmConfig.serverConfigs.embedding}
+                    CONF
+                        log_success "embedding.conf"
+                  ''
+                else
+                  ''
+                    log_warn "embedding service disabled, skipping"
+                  ''
+              }
 
-              cat > "$OUTPUT_DIR/reranking.conf" << 'CONF'
-          ${llmConfig.serverConfigs.reranking}
-          CONF
-              log_success "reranking.conf"
+              ${
+                if llmConfig.activeConfig.enable.reranking then
+                  ''
+                        cat > "$OUTPUT_DIR/reranking.conf" << 'CONF'
+                    ${llmConfig.serverConfigs.reranking}
+                    CONF
+                        log_success "reranking.conf"
+                  ''
+                else
+                  ''
+                    log_warn "reranking service disabled, skipping"
+                  ''
+              }
 
-              # Envoy config
-              log_info "Generating Envoy gateway config..."
-              cat > "$OUTPUT_DIR/envoy.yaml" << 'YAML'
-          ${llmConfig.envoyConfig}
-          YAML
-              log_success "envoy.yaml"
+              # Gateway configs
+              ${
+                if llmConfig.activeConfig.enable.envoy then
+                  ''
+                        log_info "Generating Envoy gateway config..."
+                        cat > "$OUTPUT_DIR/envoy.yaml" << 'YAML'
+                    ${llmConfig.envoyConfig}
+                    YAML
+                        log_success "envoy.yaml"
+                  ''
+                else
+                  ''
+                    log_warn "envoy gateway disabled, skipping"
+                  ''
+              }
 
-              # LiteLLM config
-              log_info "Generating LiteLLM config..."
-              cat > "$OUTPUT_DIR/litellm-config.yaml" << 'YAML'
-          ${llmConfig.litellmConfig}
-          YAML
-              log_success "litellm-config.yaml"
+              ${
+                if llmConfig.activeConfig.enable.aigw then
+                  ''
+                        log_info "Generating AI Gateway config..."
+                        cat > "$OUTPUT_DIR/aigw-config.yaml" << 'YAML'
+                    ${llmConfig.aigwConfig}
+                    YAML
+                        log_success "aigw-config.yaml"
+                  ''
+                else
+                  ""
+              }
 
-              # Systemd services
+              ${
+                if llmConfig.activeConfig.enable.litellm then
+                  ''
+                        log_info "Generating LiteLLM config..."
+                        cat > "$OUTPUT_DIR/litellm-config.yaml" << 'YAML'
+                    ${llmConfig.litellmConfig}
+                    YAML
+                        log_success "litellm-config.yaml"
+                  ''
+                else
+                  ""
+              }
+
+              # Systemd services (only for enabled services)
               log_info "Generating systemd services..."
-              cat > "$OUTPUT_DIR/llama-server-chat.service" << 'SERVICE'
-          ${llmConfig.systemdServices.chat}
-          SERVICE
-              log_success "llama-server-chat.service"
+              ${
+                if llmConfig.activeConfig.enable.chat then
+                  ''
+                        cat > "$OUTPUT_DIR/llama-server-chat.service" << 'SERVICE'
+                    ${llmConfig.systemdServices.chat}
+                    SERVICE
+                        log_success "llama-server-chat.service"
+                  ''
+                else
+                  ""
+              }
 
-              cat > "$OUTPUT_DIR/llama-server-embedding.service" << 'SERVICE'
-          ${llmConfig.systemdServices.embedding}
-          SERVICE
-              log_success "llama-server-embedding.service"
+              ${
+                if llmConfig.activeConfig.enable.embedding then
+                  ''
+                        cat > "$OUTPUT_DIR/llama-server-embedding.service" << 'SERVICE'
+                    ${llmConfig.systemdServices.embedding}
+                    SERVICE
+                        log_success "llama-server-embedding.service"
+                  ''
+                else
+                  ""
+              }
 
-              cat > "$OUTPUT_DIR/llama-server-reranking.service" << 'SERVICE'
-          ${llmConfig.systemdServices.reranking}
-          SERVICE
-              log_success "llama-server-reranking.service"
+              ${
+                if llmConfig.activeConfig.enable.reranking then
+                  ''
+                        cat > "$OUTPUT_DIR/llama-server-reranking.service" << 'SERVICE'
+                    ${llmConfig.systemdServices.reranking}
+                    SERVICE
+                        log_success "llama-server-reranking.service"
+                  ''
+                else
+                  ""
+              }
 
               # Documentation
               log_info "Generating documentation..."
@@ -1091,6 +1440,8 @@
             echo ""
             echo "Available commands:"
             echo "  nix run .#generate-configs  - Generate/show LLM configurations"
+            echo "  nix run .#build             - Build llama.cpp (rocm/vulkan/cpu)"
+            echo "  nix run .#download          - Download models from HuggingFace"
             echo "  nix run .#envoy             - Start Envoy LLM gateway (start/stop/status/test)"
             echo "  nix run .#install           - Install systemd services"
             echo "  nix run .#litellm           - Start LiteLLM AI proxy"
@@ -1119,12 +1470,15 @@
           webui-script = webuiScript;
           envoy-script = envoyScript;
           generate-configs-script = generateConfigsScript;
+          build-llama-script = buildLlamaScript;
+          download-model-script = downloadModelScript;
           litellm-config = makeLiteLLMConfig defaultConfig;
           envoy-config = makeEnvoyConfig defaultConfig;
 
           # Configs from llm-config.nix module
           llm-envoy-config = llmConfig.packages.envoyConfigFile;
           llm-litellm-config = llmConfig.packages.litellmConfigFile;
+          llm-aigw-config = llmConfig.packages.aigwConfigFile;
           llm-documentation = llmConfig.packages.documentationFile;
 
           default = installScript;
@@ -1160,6 +1514,16 @@
           generate-configs = {
             type = "app";
             program = "${generateConfigsScript}/bin/llama-generate-configs";
+          };
+
+          build = {
+            type = "app";
+            program = "${buildLlamaScript}/bin/llama-build";
+          };
+
+          download = {
+            type = "app";
+            program = "${downloadModelScript}/bin/llama-download";
           };
 
           default = self.apps.${system}.install;

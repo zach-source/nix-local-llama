@@ -6,21 +6,54 @@
 # 2. Hardware profiles (Strix Halo, RDNA3, Vulkan)
 # 3. Endpoint configurations with OpenAI-compatible aliases
 # 4. Generated llama.cpp server configs
-# 5. Generated Envoy gateway routing
+# 5. Generated Envoy and AI Gateway routing configs
 #
 # Usage:
 #   let
-#     llmConfig = import ./nix/llm-config.nix { inherit pkgs; };
+#     llmConfig = import ./nix/llm-config.nix {
+#       inherit pkgs;
+#       # Optional: override paths
+#       modelsDir = "/path/to/models";
+#       llamaCppDir = "/path/to/llama.cpp";
+#     };
 #   in
 #   llmConfig.services.chat  # Returns chat service config
 #   llmConfig.envoyConfig    # Returns Envoy YAML
+#   llmConfig.aigwConfig     # Returns AI Gateway YAML
 #   llmConfig.systemdUnits   # Returns systemd service files
 
 {
   pkgs ? import <nixpkgs> { },
+
+  # Configurable paths with sensible defaults
+  modelsDir ? builtins.getEnv "MODELS_DIR",
+  llamaCppDir ? builtins.getEnv "LLAMA_DIR",
+  rocmPath ? "/opt/rocm",
+  configDir ? "/etc/llama-server",
+
+  # Service enable flags
+  enableChat ? true,
+  enableEmbedding ? true,
+  enableReranking ? true,
+
+  # Gateway enable flags
+  enableEnvoy ? true,
+  enableAigw ? false,
+  enableLitellm ? false,
+
+  # Hardware profile selection
+  hardwareProfile ? "strix-halo",
 }:
 
 let
+  # Resolve paths with fallback defaults
+  paths = {
+    models = if modelsDir != "" then modelsDir else "$HOME/models";
+    llamaCpp = if llamaCppDir != "" then llamaCppDir else "$HOME/llama.cpp";
+    rocm = rocmPath;
+    config = configDir;
+  };
+
   #############################################################################
   # HARDWARE PROFILES
   #############################################################################
@@ -44,7 +77,7 @@ let
         HSA_ENABLE_SDMA = "0";
         GPU_MAX_HEAP_SIZE = "99";
         GPU_MAX_ALLOC_PERCENT = "99";
-        LD_LIBRARY_PATH = "/opt/rocm/lib:/usr/lib/x86_64-linux-gnu";
+        LD_LIBRARY_PATH = "${paths.rocm}/lib:/usr/lib/x86_64-linux-gnu";
       };
 
       # Recommended flags for UMA
@@ -75,7 +108,7 @@ let
       environment = {
         HSA_OVERRIDE_GFX_VERSION = "11.0.0";
         HIP_VISIBLE_DEVICES = "0";
-        LD_LIBRARY_PATH = "/opt/rocm/lib";
+        LD_LIBRARY_PATH = "${paths.rocm}/lib";
       };
 
       defaultFlags = [
@@ -317,15 +350,27 @@ let
   # ACTIVE CONFIGURATION
   # Specify which models to use for each endpoint
   #############################################################################
+  selectedHardware = hardwareProfiles.${hardwareProfile};
+
   activeConfig = {
-    hardware = hardwareProfiles.strix-halo;
-    modelsDir = "/home/ztaylor/models";
-    llamaCppDir = "/home/ztaylor/llama.cpp";
+    hardware = selectedHardware;
+    inherit paths;
     buildDir = "build-rocm";
+
+    # Enable flags
+    enable = {
+      chat = enableChat;
+      embedding = enableEmbedding;
+      reranking = enableReranking;
+      envoy = enableEnvoy;
+      aigw = enableAigw;
+      litellm = enableLitellm;
+    };
 
     # Active model selections
     services = {
       chat = {
+        enable = enableChat;
         model = modelLibrary.chat.devstral2-123b;
         endpoint = endpointConfig.chat;
         contextSize = 262144; # Full 256K context with Q4_K_M
@@ -338,12 +383,14 @@ let
       };
 
       embedding = {
+        enable = enableEmbedding;
         model = modelLibrary.embedding.qwen3-embed-8b;
         endpoint = endpointConfig.embedding;
         modelAliases = [ "qwen3-embed" ];
       };
 
       reranking = {
+        enable = enableReranking;
         model = modelLibrary.reranking.bge-reranker-v2-m3;
         endpoint = endpointConfig.reranking;
         modelAliases = [
@@ -365,7 +412,17 @@ let
         models = 10;
       };
     };
+
+    # AI Gateway settings (Kubernetes Gateway API style)
+    aigw = {
+      port = 4002;
+      namespace = "default";
+      gatewayClass = "llm-gateway";
+    };
   };
+
+  # Helper to filter enabled services
+  enabledServices = pkgs.lib.filterAttrs (name: svc: svc.enable) activeConfig.services;
 
   #############################################################################
   # CONFIGURATION GENERATORS
@@ -386,10 +443,10 @@ let
       # Service: llama-server@${name}
 
       # Binary path
-      LLAMA_BIN=${activeConfig.llamaCppDir}/${activeConfig.buildDir}/bin/llama-server
+      LLAMA_BIN=${paths.llamaCpp}/${activeConfig.buildDir}/bin/llama-server
 
       # Model path
-      MODEL_PATH=${activeConfig.modelsDir}/${model.file}
+      MODEL_PATH=${paths.models}/${model.file}
 
       # Server settings
       HOST=0.0.0.0
@@ -426,7 +483,7 @@ let
 
       ${envVars}
 
-      EnvironmentFile=/etc/llama-server/${name}.conf
+      EnvironmentFile=${paths.config}/${name}.conf
       Environment="EXTRA_FLAGS="
 
       ExecStart=/bin/bash -c "''${LLAMA_BIN} --model ''${MODEL_PATH} --host ''${HOST} --port ''${PORT} --ctx-size ''${CTX_SIZE} --n-gpu-layers ''${N_GPU_LAYERS} ''${EXTRA_FLAGS}"
@@ -452,6 +509,78 @@ let
     let
       gw = activeConfig.gateway;
       svc = activeConfig.services;
+      # Only include routes for enabled services
+      embedRoute =
+        if svc.embedding.enable then
+          ''
+            # Embeddings → embedding backend
+            - match:
+                prefix: "/v1/embeddings"
+              route:
+                cluster: llama_embed
+                timeout: ${toString gw.timeouts.embedding}s
+          ''
+        else
+          "";
+      rerankRoute =
+        if svc.reranking.enable then
+          ''
+            # Reranking → reranking backend
+            - match:
+                prefix: "/v1/rerank"
+              route:
+                cluster: llama_rerank
+                timeout: ${toString gw.timeouts.reranking}s
+
+            # Alternate rerank endpoint
+            - match:
+                prefix: "/rerank"
+              route:
+                cluster: llama_rerank
+                timeout: ${toString gw.timeouts.reranking}s
+          ''
+        else
+          "";
+      embedCluster =
+        if svc.embedding.enable then
+          ''
+            # Embedding backend (${svc.embedding.model.displayName})
+            - name: llama_embed
+              type: STATIC
+              connect_timeout: 5s
+              lb_policy: ROUND_ROBIN
+              load_assignment:
+                cluster_name: llama_embed
+                endpoints:
+                - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: ${toString svc.embedding.endpoint.port}
+          ''
+        else
+          "";
+      rerankCluster =
+        if svc.reranking.enable then
+          ''
+            # Reranking backend (${svc.reranking.model.displayName})
+            - name: llama_rerank
+              type: STATIC
+              connect_timeout: 5s
+              lb_policy: ROUND_ROBIN
+              load_assignment:
+                cluster_name: llama_rerank
+                endpoints:
+                - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: ${toString svc.reranking.endpoint.port}
+          ''
+        else
+          "";
     in
     ''
       # Envoy Proxy Configuration for Local LLM Infrastructure
@@ -459,21 +588,56 @@ let
       #
       # Architecture:
       #   Port ${toString gw.port} (Envoy Gateway) → Routes to:
-      #     /v1/embeddings  → localhost:${toString svc.embedding.endpoint.port} (${svc.embedding.model.displayName})
-      #     /v1/rerank      → localhost:${toString svc.reranking.endpoint.port} (${svc.reranking.model.displayName})
-      #     /v1/chat/*      → localhost:${toString svc.chat.endpoint.port} (${svc.chat.model.displayName})
-      #     /v1/completions → localhost:${toString svc.chat.endpoint.port} (${svc.chat.model.displayName})
+      ${
+        if svc.embedding.enable then
+          "#     /v1/embeddings  → localhost:${toString svc.embedding.endpoint.port} (${svc.embedding.model.displayName})"
+        else
+          ""
+      }
+      ${
+        if svc.reranking.enable then
+          "#     /v1/rerank      → localhost:${toString svc.reranking.endpoint.port} (${svc.reranking.model.displayName})"
+        else
+          ""
+      }
+      ${
+        if svc.chat.enable then
+          "#     /v1/chat/*      → localhost:${toString svc.chat.endpoint.port} (${svc.chat.model.displayName})"
+        else
+          ""
+      }
+      ${
+        if svc.chat.enable then
+          "#     /v1/completions → localhost:${toString svc.chat.endpoint.port} (${svc.chat.model.displayName})"
+        else
+          ""
+      }
       #     /health         → localhost:${toString svc.chat.endpoint.port} (health check)
       #
       # Supported OpenAI-compatible aliases:
-      #   Chat:       ${
-        builtins.concatStringsSep ", " (svc.chat.endpoint.aliases ++ svc.chat.modelAliases)
+      ${
+        if svc.chat.enable then
+          "#   Chat:       ${
+            builtins.concatStringsSep ", " (svc.chat.endpoint.aliases ++ svc.chat.modelAliases)
+          }"
+        else
+          ""
       }
-      #   Embeddings: ${
-        builtins.concatStringsSep ", " (svc.embedding.endpoint.aliases ++ svc.embedding.modelAliases)
+      ${
+        if svc.embedding.enable then
+          "#   Embeddings: ${
+            builtins.concatStringsSep ", " (svc.embedding.endpoint.aliases ++ svc.embedding.modelAliases)
+          }"
+        else
+          ""
       }
-      #   Reranking:  ${
-        builtins.concatStringsSep ", " (svc.reranking.endpoint.aliases ++ svc.reranking.modelAliases)
+      ${
+        if svc.reranking.enable then
+          "#   Reranking:  ${
+            builtins.concatStringsSep ", " (svc.reranking.endpoint.aliases ++ svc.reranking.modelAliases)
+          }"
+        else
+          ""
       }
 
       admin:
@@ -517,27 +681,8 @@ let
                   - name: llm_services
                     domains: ["*"]
                     routes:
-                    # Embeddings → embedding backend
-                    - match:
-                        prefix: "/v1/embeddings"
-                      route:
-                        cluster: llama_embed
-                        timeout: ${toString gw.timeouts.embedding}s
-
-                    # Reranking → reranking backend
-                    - match:
-                        prefix: "/v1/rerank"
-                      route:
-                        cluster: llama_rerank
-                        timeout: ${toString gw.timeouts.reranking}s
-
-                    # Alternate rerank endpoint
-                    - match:
-                        prefix: "/rerank"
-                      route:
-                        cluster: llama_rerank
-                        timeout: ${toString gw.timeouts.reranking}s
-
+      ${embedRoute}
+      ${rerankRoute}
                     # Chat completions → chat backend
                     - match:
                         prefix: "/v1/chat"
@@ -589,35 +734,121 @@ let
                       address: 127.0.0.1
                       port_value: ${toString svc.chat.endpoint.port}
 
-        # Embedding backend (${svc.embedding.model.displayName})
-        - name: llama_embed
-          type: STATIC
-          connect_timeout: 5s
-          lb_policy: ROUND_ROBIN
-          load_assignment:
-            cluster_name: llama_embed
-            endpoints:
-            - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: 127.0.0.1
-                      port_value: ${toString svc.embedding.endpoint.port}
+      ${embedCluster}
+      ${rerankCluster}
+    '';
 
-        # Reranking backend (${svc.reranking.model.displayName})
-        - name: llama_rerank
-          type: STATIC
-          connect_timeout: 5s
-          lb_policy: ROUND_ROBIN
-          load_assignment:
-            cluster_name: llama_rerank
-            endpoints:
-            - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: 127.0.0.1
-                      port_value: ${toString svc.reranking.endpoint.port}
+  # Generate AI Gateway configuration (Kubernetes Gateway API style)
+  makeAigwConfig =
+    let
+      gw = activeConfig.gateway;
+      aigw = activeConfig.aigw;
+      svc = activeConfig.services;
+
+      # Generate backend refs for each enabled service
+      backendRefs = pkgs.lib.mapAttrsToList (
+        name: service:
+        if service.enable then
+          {
+            inherit name;
+            port = service.endpoint.port;
+            model = service.model;
+            aliases = service.endpoint.aliases ++ service.modelAliases;
+          }
+        else
+          null
+      ) svc;
+      enabledBackends = builtins.filter (x: x != null) backendRefs;
+
+      # Generate HTTPRoute rules
+      makeRule = backend: ''
+        - matches:
+          - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: ${backend.model.displayName}
+          backendRefs:
+          - name: llama-${backend.name}
+            port: ${toString backend.port}'';
+
+      # Generate alias rules
+      makeAliasRules =
+        backend:
+        builtins.map (alias: ''
+          - matches:
+            - headers:
+              - type: Exact
+                name: x-ai-eg-model
+                value: ${alias}
+            backendRefs:
+            - name: llama-${backend.name}
+              port: ${toString backend.port}'') backend.aliases;
+
+      allRules = builtins.concatStringsSep "\n" (
+        builtins.concatLists (builtins.map (b: [ (makeRule b) ] ++ (makeAliasRules b)) enabledBackends)
+      );
+
+      # Generate Service definitions
+      makeService = backend: ''
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: llama-${backend.name}
+          namespace: ${aigw.namespace}
+        spec:
+          ports:
+          - port: ${toString backend.port}
+            targetPort: ${toString backend.port}
+            protocol: TCP
+            name: http
+          type: ClusterIP
+          selector:
+            app: llama-${backend.name}'';
+
+      allServices = builtins.concatStringsSep "\n" (builtins.map makeService enabledBackends);
+    in
+    ''
+      # AI Gateway Configuration
+      # Kubernetes Gateway API style configuration for LLM routing
+      # Generated by nix/llm-config.nix
+      #
+      # This config uses the x-ai-eg-model header for model-based routing
+      # Compatible with Envoy AI Gateway and similar implementations
+
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: GatewayClass
+      metadata:
+        name: ${aigw.gatewayClass}
+      spec:
+        controllerName: gateway.envoyproxy.io/gatewayclass-controller
+      ---
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: llm-gateway
+        namespace: ${aigw.namespace}
+      spec:
+        gatewayClassName: ${aigw.gatewayClass}
+        listeners:
+        - name: http
+          protocol: HTTP
+          port: ${toString aigw.port}
+          allowedRoutes:
+            namespaces:
+              from: Same
+      ---
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: llm-routes
+        namespace: ${aigw.namespace}
+      spec:
+        parentRefs:
+        - name: llm-gateway
+        rules:
+      ${allRules}
+      ${allServices}
     '';
 
   # Generate LiteLLM config for model aliasing
@@ -632,13 +863,16 @@ let
           ep = service.endpoint;
           allAliases = ep.aliases ++ service.modelAliases;
         in
-        builtins.map (alias: ''
-          - model_name: ${alias}
-            litellm_params:
-              model: openai/${builtins.head service.modelAliases}
-              api_base: http://localhost:${toString ep.port}/v1
-              api_key: "sk-local"
-        '') allAliases;
+        if service.enable then
+          builtins.map (alias: ''
+            - model_name: ${alias}
+              litellm_params:
+                model: openai/${builtins.head service.modelAliases}
+                api_base: http://localhost:${toString ep.port}/v1
+                api_key: "sk-local"
+          '') allAliases
+        else
+          [ ];
     in
     ''
       # LiteLLM Proxy Configuration
@@ -677,15 +911,38 @@ let
 
       ## Active Configuration
 
-      | Service | Model | Port | Context |
-      |---------|-------|------|---------|
+      | Service | Model | Port | Context | Enabled |
+      |---------|-------|------|---------|---------|
       | Chat | ${svc.chat.model.displayName} | ${toString svc.chat.endpoint.port} | ${
         toString (svc.chat.contextSize or svc.chat.model.contextDefault)
+      } | ${if svc.chat.enable then "✓" else "✗"} |
+      | Embedding | ${svc.embedding.model.displayName} | ${toString svc.embedding.endpoint.port} | ${toString svc.embedding.model.contextDefault} | ${
+        if svc.embedding.enable then "✓" else "✗"
       } |
-      | Embedding | ${svc.embedding.model.displayName} | ${toString svc.embedding.endpoint.port} | ${toString svc.embedding.model.contextDefault} |
-      | Reranking | ${svc.reranking.model.displayName} | ${toString svc.reranking.endpoint.port} | ${toString svc.reranking.model.contextDefault} |
+      | Reranking | ${svc.reranking.model.displayName} | ${toString svc.reranking.endpoint.port} | ${toString svc.reranking.model.contextDefault} | ${
+        if svc.reranking.enable then "✓" else "✗"
+      } |
 
-      ## Gateway
+      ## Paths
+
+      | Setting | Value |
+      |---------|-------|
+      | Models Directory | `${paths.models}` |
+      | llama.cpp Directory | `${paths.llamaCpp}` |
+      | ROCm Path | `${paths.rocm}` |
+      | Config Directory | `${paths.config}` |
+
+      ## Gateways
+
+      | Gateway | Port | Enabled |
+      |---------|------|---------|
+      | Envoy | ${toString gw.port} | ${if activeConfig.enable.envoy then "✓" else "✗"} |
+      | AI Gateway | ${toString activeConfig.aigw.port} | ${
+        if activeConfig.enable.aigw then "✓" else "✗"
+      } |
+      | LiteLLM | 4000 | ${if activeConfig.enable.litellm then "✓" else "✗"} |
+
+      ## Gateway Routes
 
       **Unified Endpoint:** `http://localhost:${toString gw.port}`
 
@@ -748,28 +1005,33 @@ in
     modelLibrary
     endpointConfig
     activeConfig
+    paths
+    enabledServices
     ;
 
   # Generated configurations
-  serverConfigs = builtins.mapAttrs makeServerConf activeConfig.services;
-  systemdServices = builtins.mapAttrs makeSystemdService activeConfig.services;
-  envoyConfig = makeEnvoyConfig;
-  litellmConfig = makeLiteLLMConfig;
+  serverConfigs = builtins.mapAttrs makeServerConf enabledServices;
+  systemdServices = builtins.mapAttrs makeSystemdService enabledServices;
+  envoyConfig = if enableEnvoy then makeEnvoyConfig else null;
+  aigwConfig = if enableAigw then makeAigwConfig else null;
+  litellmConfig = if enableLitellm then makeLiteLLMConfig else null;
   documentation = makeDocumentation;
 
   # Derivations for Nix store
   packages = {
-    envoyConfigFile = pkgs.writeText "envoy.yaml" makeEnvoyConfig;
-    litellmConfigFile = pkgs.writeText "litellm-config.yaml" makeLiteLLMConfig;
+    envoyConfigFile = if enableEnvoy then pkgs.writeText "envoy.yaml" makeEnvoyConfig else null;
+    aigwConfigFile = if enableAigw then pkgs.writeText "aigw-config.yaml" makeAigwConfig else null;
+    litellmConfigFile =
+      if enableLitellm then pkgs.writeText "litellm-config.yaml" makeLiteLLMConfig else null;
     documentationFile = pkgs.writeText "CONFIGURATION.md" makeDocumentation;
 
     serverConfFiles = builtins.mapAttrs (name: conf: pkgs.writeText "${name}.conf" conf) (
-      builtins.mapAttrs makeServerConf activeConfig.services
+      builtins.mapAttrs makeServerConf enabledServices
     );
 
     systemdServiceFiles = builtins.mapAttrs (
       name: svc: pkgs.writeText "llama-server-${name}.service" svc
-    ) (builtins.mapAttrs makeSystemdService activeConfig.services);
+    ) (builtins.mapAttrs makeSystemdService enabledServices);
   };
 
   # Helper functions for customization
@@ -807,6 +1069,74 @@ in
         activeConfig = activeConfig // {
           hardware = hardwareProfiles.${profileKey};
         };
+      };
+
+    # Enable/disable services
+    withServices =
+      {
+        chat ? enableChat,
+        embedding ? enableEmbedding,
+        reranking ? enableReranking,
+      }:
+      import ./llm-config.nix {
+        inherit
+          pkgs
+          modelsDir
+          llamaCppDir
+          rocmPath
+          configDir
+          hardwareProfile
+          ;
+        enableChat = chat;
+        enableEmbedding = embedding;
+        enableReranking = reranking;
+        inherit enableEnvoy enableAigw enableLitellm;
+      };
+
+    # Enable/disable gateways
+    withGateways =
+      {
+        envoy ? enableEnvoy,
+        aigw ? enableAigw,
+        litellm ? enableLitellm,
+      }:
+      import ./llm-config.nix {
+        inherit
+          pkgs
+          modelsDir
+          llamaCppDir
+          rocmPath
+          configDir
+          hardwareProfile
+          ;
+        inherit enableChat enableEmbedding enableReranking;
+        enableEnvoy = envoy;
+        enableAigw = aigw;
+        enableLitellm = litellm;
+      };
+
+    # Set paths
+    withPaths =
+      {
+        models ? modelsDir,
+        llamaCpp ? llamaCppDir,
+        rocm ? rocmPath,
+        config ? configDir,
+      }:
+      import ./llm-config.nix {
+        inherit pkgs hardwareProfile;
+        modelsDir = models;
+        llamaCppDir = llamaCpp;
+        rocmPath = rocm;
+        configDir = config;
+        inherit
+          enableChat
+          enableEmbedding
+          enableReranking
+          enableEnvoy
+          enableAigw
+          enableLitellm
+          ;
       };
   };
 }

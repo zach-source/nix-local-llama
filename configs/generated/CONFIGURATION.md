@@ -2,13 +2,30 @@
 
 ## Active Configuration
 
-| Service | Model | Port | Context |
-|---------|-------|------|---------|
-| Chat | Devstral-2-123B | 8000 | 262144 |
-| Embedding | Qwen3-Embedding-8B | 8001 | 8192 |
-| Reranking | BGE-Reranker-v2-m3 | 8002 | 512 |
+| Service | Model | Port | Context | Enabled |
+|---------|-------|------|---------|---------|
+| Chat | Devstral-2-123B | 8000 | 262144 | ✓ |
+| Embedding | Qwen3-Embedding-8B | 8001 | 8192 | ✓ |
+| Reranking | BGE-Reranker-v2-m3 | 8002 | 512 | ✓ |
 
-## Gateway
+## Paths
+
+| Setting | Value |
+|---------|-------|
+| Models Directory | `$HOME/models` |
+| llama.cpp Directory | `$HOME/llama.cpp` |
+| ROCm Path | `/opt/rocm` |
+| Config Directory | `/etc/llama-server` |
+
+## Gateways
+
+| Gateway | Port | Enabled |
+|---------|------|---------|
+| Envoy | 4001 | ✓ |
+| AI Gateway | 4002 | ✗ |
+| LiteLLM | 4000 | ✗ |
+
+## Gateway Routes
 
 **Unified Endpoint:** `http://localhost:4001`
 

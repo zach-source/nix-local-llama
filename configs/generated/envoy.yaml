@@ -55,26 +55,26 @@ static_resources:
             - name: llm_services
               domains: ["*"]
               routes:
-              # Embeddings → embedding backend
-              - match:
-                  prefix: "/v1/embeddings"
-                route:
-                  cluster: llama_embed
-                  timeout: 120s
+# Embeddings → embedding backend
+- match:
+    prefix: "/v1/embeddings"
+  route:
+    cluster: llama_embed
+    timeout: 120s
 
-              # Reranking → reranking backend
-              - match:
-                  prefix: "/v1/rerank"
-                route:
-                  cluster: llama_rerank
-                  timeout: 60s
+# Reranking → reranking backend
+- match:
+    prefix: "/v1/rerank"
+  route:
+    cluster: llama_rerank
+    timeout: 60s
 
-              # Alternate rerank endpoint
-              - match:
-                  prefix: "/rerank"
-                route:
-                  cluster: llama_rerank
-                  timeout: 60s
+# Alternate rerank endpoint
+- match:
+    prefix: "/rerank"
+  route:
+    cluster: llama_rerank
+    timeout: 60s
 
               # Chat completions → chat backend
               - match:
@@ -127,33 +127,34 @@ static_resources:
                 address: 127.0.0.1
                 port_value: 8000
 
-  # Embedding backend (Qwen3-Embedding-8B)
-  - name: llama_embed
-    type: STATIC
-    connect_timeout: 5s
-    lb_policy: ROUND_ROBIN
-    load_assignment:
-      cluster_name: llama_embed
-      endpoints:
-      - lb_endpoints:
-        - endpoint:
-            address:
-              socket_address:
-                address: 127.0.0.1
-                port_value: 8001
+# Embedding backend (Qwen3-Embedding-8B)
+- name: llama_embed
+  type: STATIC
+  connect_timeout: 5s
+  lb_policy: ROUND_ROBIN
+  load_assignment:
+    cluster_name: llama_embed
+    endpoints:
+    - lb_endpoints:
+      - endpoint:
+          address:
+            socket_address:
+              address: 127.0.0.1
+              port_value: 8001
 
-  # Reranking backend (BGE-Reranker-v2-m3)
-  - name: llama_rerank
-    type: STATIC
-    connect_timeout: 5s
-    lb_policy: ROUND_ROBIN
-    load_assignment:
-      cluster_name: llama_rerank
-      endpoints:
-      - lb_endpoints:
-        - endpoint:
-            address:
-              socket_address:
-                address: 127.0.0.1
-                port_value: 8002
+# Reranking backend (BGE-Reranker-v2-m3)
+- name: llama_rerank
+  type: STATIC
+  connect_timeout: 5s
+  lb_policy: ROUND_ROBIN
+  load_assignment:
+    cluster_name: llama_rerank
+    endpoints:
+    - lb_endpoints:
+      - endpoint:
+          address:
+            socket_address:
+              address: 127.0.0.1
+              port_value: 8002
+
 
