@@ -118,16 +118,36 @@ let
         source = "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct-GGUF";
       };
 
-      devstral-24b = {
-        displayName = "Devstral-Small-2-24B";
-        file = "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf";
-        sizeGb = 13.3;
+      # Devstral 2 123B - Best open-source coding model (72.2% SWE-bench)
+      # Requires Q5_K_M (88GB) to fit in 96GB VRAM with context
+      devstral2-123b = {
+        displayName = "Devstral-2-123B";
+        file = "Devstral-2-123B-Instruct-2512-Q5_K_M.gguf";
+        sizeGb = 88;
         contextMax = 262144;
         contextDefault = 131072;
-        quantization = "Q4_K_M";
+        quantization = "Q5_K_M";
+        useCase = "coding";
+        parameters = "123B";
+        sweBenchScore = 72.2;
+        source = "https://huggingface.co/unsloth/Devstral-2-123B-Instruct-2512-GGUF";
+        notes = "Dense transformer, 256K context, best for complex agentic coding";
+      };
+
+      # Devstral Small 2 24B - Fast coding model (68% SWE-bench)
+      # Q8_0 fits easily, leaves room for large context
+      devstral2-24b = {
+        displayName = "Devstral-Small-2-24B";
+        file = "Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf";
+        sizeGb = 25;
+        contextMax = 262144;
+        contextDefault = 131072;
+        quantization = "Q8_0";
         useCase = "coding";
         parameters = "24B";
-        source = "https://huggingface.co/mistralai/Devstral-Small-2-24B-GGUF";
+        sweBenchScore = 68.0;
+        source = "https://huggingface.co/unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF";
+        notes = "Fast inference, full Q8 quality, good for interactive coding";
       };
 
       qwen25-coder-14b = {
