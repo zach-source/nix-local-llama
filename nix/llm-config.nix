@@ -153,9 +153,10 @@ let
 
       # Devstral 2 123B Q4 - Fits 96GB with 256K context
       # Model: 75GB + KV cache Q8 256K: ~14GB = ~89GB total (fits!)
+      # Split file: point to first file, llama.cpp auto-loads all parts
       devstral2-123b = {
         displayName = "Devstral-2-123B";
-        file = "Devstral-2-123B-Instruct-2512-Q4_K_M.gguf";
+        file = "Q4_K_M/Devstral-2-123B-Instruct-2512-Q4_K_M-00001-of-00002.gguf";
         sizeGb = 75;
         contextMax = 262144;
         contextDefault = 262144;
@@ -164,7 +165,7 @@ let
         parameters = "123B (88 layers)";
         sweBenchScore = 72.2;
         source = "https://huggingface.co/unsloth/Devstral-2-123B-Instruct-2512-GGUF";
-        notes = "Dense transformer, 256K context, best for complex agentic coding";
+        notes = "Dense transformer, 256K context, best for complex agentic coding. Split into 2 files.";
       };
 
       # Devstral 2 123B Q5 - Higher quality, needs reduced context
