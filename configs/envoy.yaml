@@ -5,12 +5,12 @@
 #   Port 4001 (Envoy Gateway) → Routes to:
 #     /v1/embeddings  → localhost:8001 (Qwen3-Embedding-8B)
 #     /v1/rerank      → localhost:8002 (BGE-Reranker-v2-m3)
-#     /v1/chat/*      → localhost:8000 (Qwen3-Coder-30B-A3B)
-#     /v1/completions → localhost:8000 (Qwen3-Coder-30B-A3B)
+#     /v1/chat/*      → localhost:8000 (Devstral-2-123B)
+#     /v1/completions → localhost:8000 (Devstral-2-123B)
 #     /health         → localhost:8000 (health check)
 #
 # Supported OpenAI-compatible aliases:
-#   Chat:       gpt-4, gpt-4-turbo, gpt-4o, gpt-3.5-turbo, claude-3-opus, claude-3-sonnet, qwen3-coder, qwen-coder
+#   Chat:       gpt-4, gpt-4-turbo, gpt-4o, gpt-3.5-turbo, claude-3-opus, claude-3-sonnet, devstral, devstral-2, mistral-large, devstral, devstral2, mistral-coder
 #   Embeddings: text-embedding-ada-002, text-embedding-3-small, text-embedding-3-large, qwen3-embed
 #   Reranking:  rerank-english-v3.0, rerank-multilingual-v3.0, bge-reranker, rerank
 
@@ -112,7 +112,7 @@ static_resources:
                   timeout: 600s
 
   clusters:
-  # Chat/Completions backend (Qwen3-Coder-30B-A3B)
+  # Chat/Completions backend (Devstral-2-123B)
   - name: llama_chat
     type: STATIC
     connect_timeout: 5s

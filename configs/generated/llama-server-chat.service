@@ -1,5 +1,5 @@
 [Unit]
-Description=LLaMA Server (chat - Qwen3-Coder-30B-A3B)
+Description=LLaMA Server (chat - Devstral-2-123B)
 Documentation=https://github.com/ggerganov/llama.cpp
 After=network.target
 Wants=network-online.target

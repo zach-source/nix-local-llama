@@ -6,49 +6,73 @@ model_list:
   # Chat/Completions models → port 8000
 - model_name: gpt-4
   litellm_params:
-    model: openai/qwen3-coder
+    model: openai/devstral
     api_base: http://localhost:8000/v1
     api_key: "sk-local"
 
 - model_name: gpt-4-turbo
   litellm_params:
-    model: openai/qwen3-coder
+    model: openai/devstral
     api_base: http://localhost:8000/v1
     api_key: "sk-local"
 
 - model_name: gpt-4o
   litellm_params:
-    model: openai/qwen3-coder
+    model: openai/devstral
     api_base: http://localhost:8000/v1
     api_key: "sk-local"
 
 - model_name: gpt-3.5-turbo
   litellm_params:
-    model: openai/qwen3-coder
+    model: openai/devstral
     api_base: http://localhost:8000/v1
     api_key: "sk-local"
 
 - model_name: claude-3-opus
   litellm_params:
-    model: openai/qwen3-coder
+    model: openai/devstral
     api_base: http://localhost:8000/v1
     api_key: "sk-local"
 
 - model_name: claude-3-sonnet
   litellm_params:
-    model: openai/qwen3-coder
+    model: openai/devstral
     api_base: http://localhost:8000/v1
     api_key: "sk-local"
 
-- model_name: qwen3-coder
+- model_name: devstral
   litellm_params:
-    model: openai/qwen3-coder
+    model: openai/devstral
     api_base: http://localhost:8000/v1
     api_key: "sk-local"
 
-- model_name: qwen-coder
+- model_name: devstral-2
   litellm_params:
-    model: openai/qwen3-coder
+    model: openai/devstral
+    api_base: http://localhost:8000/v1
+    api_key: "sk-local"
+
+- model_name: mistral-large
+  litellm_params:
+    model: openai/devstral
+    api_base: http://localhost:8000/v1
+    api_key: "sk-local"
+
+- model_name: devstral
+  litellm_params:
+    model: openai/devstral
+    api_base: http://localhost:8000/v1
+    api_key: "sk-local"
+
+- model_name: devstral2
+  litellm_params:
+    model: openai/devstral
+    api_base: http://localhost:8000/v1
+    api_key: "sk-local"
+
+- model_name: mistral-coder
+  litellm_params:
+    model: openai/devstral
     api_base: http://localhost:8000/v1
     api_key: "sk-local"
 

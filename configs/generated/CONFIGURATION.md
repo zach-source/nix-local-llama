@@ -4,7 +4,7 @@
 
 | Service | Model | Port | Context |
 |---------|-------|------|---------|
-| Chat | Qwen3-Coder-30B-A3B | 8000 | 262144 |
+| Chat | Devstral-2-123B | 8000 | 262144 |
 | Embedding | Qwen3-Embedding-8B | 8001 | 8192 |
 | Reranking | BGE-Reranker-v2-m3 | 8002 | 512 |
 
@@ -22,7 +22,7 @@
 ## OpenAI-Compatible Aliases
 
 **Chat Models:**
-gpt-4, gpt-4-turbo, gpt-4o, gpt-3.5-turbo, claude-3-opus, claude-3-sonnet, qwen3-coder, qwen-coder
+gpt-4, gpt-4-turbo, gpt-4o, gpt-3.5-turbo, claude-3-opus, claude-3-sonnet, devstral, devstral-2, mistral-large, devstral, devstral2, mistral-coder
 
 **Embedding Models:**
 text-embedding-ada-002, text-embedding-3-small, text-embedding-3-large, qwen3-embed

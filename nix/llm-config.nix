@@ -118,20 +118,35 @@ let
         source = "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct-GGUF";
       };
 
-      # Devstral 2 123B - Best open-source coding model (72.2% SWE-bench)
-      # Requires Q5_K_M (88GB) to fit in 96GB VRAM with context
+      # Devstral 2 123B Q4 - Fits 96GB with 256K context
+      # Model: 75GB + KV cache Q8 256K: ~14GB = ~89GB total (fits!)
       devstral2-123b = {
         displayName = "Devstral-2-123B";
-        file = "Devstral-2-123B-Instruct-2512-Q5_K_M.gguf";
-        sizeGb = 88;
+        file = "Devstral-2-123B-Instruct-2512-Q4_K_M.gguf";
+        sizeGb = 75;
         contextMax = 262144;
-        contextDefault = 131072;
-        quantization = "Q5_K_M";
+        contextDefault = 262144;
+        quantization = "Q4_K_M";
         useCase = "coding";
-        parameters = "123B";
+        parameters = "123B (88 layers)";
         sweBenchScore = 72.2;
         source = "https://huggingface.co/unsloth/Devstral-2-123B-Instruct-2512-GGUF";
         notes = "Dense transformer, 256K context, best for complex agentic coding";
+      };
+
+      # Devstral 2 123B Q5 - Higher quality, needs reduced context
+      devstral2-123b-q5 = {
+        displayName = "Devstral-2-123B-Q5";
+        file = "Devstral-2-123B-Instruct-2512-Q5_K_M.gguf";
+        sizeGb = 88;
+        contextMax = 262144;
+        contextDefault = 65536; # Reduced for VRAM headroom
+        quantization = "Q5_K_M";
+        useCase = "coding";
+        parameters = "123B (88 layers)";
+        sweBenchScore = 72.2;
+        source = "https://huggingface.co/unsloth/Devstral-2-123B-Instruct-2512-GGUF";
+        notes = "Higher quality quant, reduced context for VRAM fit";
       };
 
       # Devstral Small 2 24B - Fast coding model (68% SWE-bench)
@@ -233,6 +248,9 @@ let
         "gpt-3.5-turbo"
         "claude-3-opus"
         "claude-3-sonnet"
+        "devstral"
+        "devstral-2"
+        "mistral-large"
       ];
 
       # llama.cpp specific flags
@@ -308,13 +326,14 @@ let
     # Active model selections
     services = {
       chat = {
-        model = modelLibrary.chat.qwen3-coder-30b;
+        model = modelLibrary.chat.devstral2-123b;
         endpoint = endpointConfig.chat;
-        contextSize = 262144; # Override default if needed
+        contextSize = 262144; # Full 256K context with Q4_K_M
         # Additional service-specific model aliases
         modelAliases = [
-          "qwen3-coder"
-          "qwen-coder"
+          "devstral"
+          "devstral2"
+          "mistral-coder"
         ];
       };
 
