@@ -712,18 +712,17 @@
           log_success() { echo -e "${"$"}{GREEN}[OK]${"$"}{NC} $1"; }
           log_warn() { echo -e "${"$"}{YELLOW}[WARN]${"$"}{NC} $1"; }
 
-          # Model definitions from llm-config.nix
+          # Model definitions - format: "repo:file" or "repo:file1,file2" for split models
           declare -A MODELS=(
-              # Chat models
-              ["devstral2-123b"]="unsloth/Devstral-2-123B-Instruct-2512-GGUF:Devstral-2-123B-Instruct-2512-Q4_K_M.gguf"
-              ["devstral2-123b-q5"]="unsloth/Devstral-2-123B-Instruct-2512-GGUF:Devstral-2-123B-Instruct-2512-Q5_K_M.gguf"
+              # Chat models (Devstral-2 123B is split into 2 files in Q4_K_M subdir)
+              ["devstral2-123b"]="unsloth/Devstral-2-123B-Instruct-2512-GGUF:Q4_K_M/Devstral-2-123B-Instruct-2512-Q4_K_M-00001-of-00002.gguf,Q4_K_M/Devstral-2-123B-Instruct-2512-Q4_K_M-00002-of-00002.gguf"
               ["devstral2-24b"]="unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF:Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf"
               ["qwen3-coder-30b"]="Qwen/Qwen3-Coder-30B-A3B-Instruct-GGUF:Qwen3-Coder-30B-A3B-Instruct-Q6_K.gguf"
               # Embedding models
               ["qwen3-embed-8b"]="Qwen/Qwen3-Embedding-8B-GGUF:Qwen3-Embedding-8B-Q8_0.gguf"
-              ["nomic-embed"]="nomic-ai/nomic-embed-text-v1.5-GGUF:nomic-embed-text-v1.5-Q8_0.gguf"
-              # Reranking models
-              ["bge-reranker"]="BAAI/bge-reranker-v2-m3-GGUF:bge-reranker-v2-m3-Q8_0.gguf"
+              ["nomic-embed"]="nomic-ai/nomic-embed-text-v1.5-GGUF:nomic-embed-text-v1.5.f16.gguf"
+              # Reranking models (gpustack provides GGUF, not BAAI directly)
+              ["bge-reranker"]="gpustack/bge-reranker-v2-m3-GGUF:bge-reranker-v2-m3-Q8_0.gguf"
           )
 
           download_model() {
@@ -740,30 +739,35 @@
               fi
 
               local repo="${"$"}{spec%%:*}"
-              local file="${"$"}{spec#*:}"
+              local files="${"$"}{spec#*:}"
 
-              log_info "Downloading $file from $repo..."
               mkdir -p "$MODELS_DIR"
 
-              if command -v huggingface-cli &>/dev/null; then
-                  huggingface-cli download "$repo" \
-                      --include "$file" \
-                      --local-dir "$MODELS_DIR"
-              else
-                  log_warn "huggingface-cli not found, using curl..."
-                  curl -L -o "$MODELS_DIR/$file" \
-                      "https://huggingface.co/$repo/resolve/main/$file"
-              fi
+              # Handle multiple files (comma-separated)
+              IFS=',' read -ra FILE_LIST <<< "$files"
+              for file in "${"$"}{FILE_LIST[@]}"; do
+                  local basename="${"$"}{file##*/}"
+                  log_info "Downloading $basename from $repo..."
 
-              log_success "Downloaded to $MODELS_DIR/$file"
+                  if command -v huggingface-cli &>/dev/null; then
+                      huggingface-cli download "$repo" "$file" \
+                          --local-dir "$MODELS_DIR" \
+                          --local-dir-use-symlinks False
+                  else
+                      log_warn "huggingface-cli not found, using curl..."
+                      curl -L -o "$MODELS_DIR/$basename" \
+                          "https://huggingface.co/$repo/resolve/main/$file"
+                  fi
+
+                  log_success "Downloaded $basename"
+              done
           }
 
           list_models() {
               echo "Available models:"
               echo ""
               echo "Chat Models:"
-              echo "  devstral2-123b      Devstral-2-123B Q4_K_M (75GB) - Best for agentic coding"
-              echo "  devstral2-123b-q5   Devstral-2-123B Q5_K_M (88GB) - Higher quality"
+              echo "  devstral2-123b      Devstral-2-123B Q4_K_M (75GB, 2 files) - Best for agentic coding"
               echo "  devstral2-24b       Devstral-Small-2-24B Q8 (25GB) - Fast inference"
               echo "  qwen3-coder-30b     Qwen3-Coder-30B-A3B Q6 (24GB) - MoE coding model"
               echo ""
