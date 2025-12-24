@@ -1,6 +1,6 @@
 # Local LLM Infrastructure
 
-Run large language models locally on AMD APU hardware with ROCm/HIP acceleration.
+Run large language models locally on AMD APU hardware with ROCm/HIP acceleration. Nix-based configuration for llama.cpp servers with unified API gateway routing.
 
 ## Hardware Target
 
@@ -8,25 +8,43 @@ Run large language models locally on AMD APU hardware with ROCm/HIP acceleration
 - Architecture: gfx1151
 - Unified Memory: 128GB total (configurable split)
 - Current Config: 32GB System / 96GB GPU VRAM
-- Wave Size: 32
+- ROCm Version: 7.1.1 (with rocWMMA flash attention)
+
+## Current Model Stack
+
+| Service | Model | Size | Context | Port |
+|---------|-------|------|---------|------|
+| **Chat** | Devstral-2-123B Q4_K_M | 75 GB | 256K | 8000 |
+| **Embedding** | Qwen3-Embedding-8B Q8 | 8.5 GB | 8K | 8001 |
+| **Reranking** | BGE-Reranker-v2-m3 Q8 | 1.2 GB | 512 | 8002 |
+| **Gateway** | Envoy Proxy | — | — | 4001 |
+
+Memory: ~89GB total (within 96GB VRAM)
 
 ## Features
 
-- **Multiple Model Types**: Chat, Embeddings, and Reranking
-- **LiteLLM Proxy**: OpenAI-compatible chat API with model aliasing (gpt-4 → local)
-- **Nix Flake**: Reproducible builds and deployment
-- **Systemd Services**: Production-ready service management for all models
+- **Unified Nix Configuration**: Single source of truth in `nix/llm-config.nix`
+- **Envoy API Gateway**: OpenAI-compatible routing with model aliasing
+- **Multiple Backends**: Chat, embeddings, and reranking on separate ports
+- **Systemd Services**: Production-ready service management
+- **Config Generation**: Auto-generate llama.cpp, Envoy, LiteLLM, and systemd configs
 
 ## Quick Start
 
-### Using Nix Flake (Recommended)
+### Using Nix Flake
 
 ```bash
 # Enter development shell
 nix develop
 
-# Or run the install script
-nix run .#install
+# Show current configuration
+nix run .#generate-configs -- show
+
+# Generate all config files
+nix run .#generate-configs -- generate
+
+# Start Envoy gateway
+nix run .#envoy
 ```
 
 ### Manual Setup
@@ -35,14 +53,17 @@ nix run .#install
 # 1. Apply ROCm VRAM fix (required for 96GB config)
 ./scripts/rocm-vram-fix.sh
 
-# 2. Build llama.cpp with UMA support
+# 2. Build llama.cpp with ROCm support
 ./scripts/build-llama-uma.sh
 
-# 3. Start model servers
-./scripts/start-server.sh devstral
+# 3. Download model
+huggingface-cli download unsloth/Devstral-2-123B-Instruct-2512-GGUF \
+  --include "Devstral-2-123B-Instruct-2512-Q4_K_M.gguf" \
+  --local-dir ~/models/
 
-# 4. Start LiteLLM proxy (unified API)
-./scripts/start-litellm.sh
+# 4. Start using generated config
+source configs/generated/chat.conf
+$LLAMA_BIN -m $MODEL_PATH --host $HOST --port $PORT -c $CTX_SIZE $EXTRA_FLAGS
 ```
 
 ## Architecture
@@ -51,237 +72,184 @@ nix run .#install
 ┌─────────────────────────────────────────────────────────────┐
 │                    Client Applications                       │
 │         (OpenAI SDK, LangChain, LlamaIndex, etc.)           │
+│                                                              │
+│   Use any model alias: gpt-4, claude-3-opus, devstral, etc. │
 └─────────────────────────────────────────────────────────────┘
                               │
-            ┌─────────────────┼─────────────────┐
-            ▼                 ▼                 ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│ LiteLLM (:4000) │ │  Embed (:8001)  │ │ Rerank (:8002)  │
-│   Chat Proxy    │ │  Qwen3-Embed    │ │  BGE-Reranker   │
-│  (gpt-4 alias)  │ │   (direct)      │ │   (direct)      │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
-            │
-            ▼
-┌─────────────────┐
-│   Chat (:8000)  │
-│  Qwen3-Coder    │
-│     30B-A3B     │
-└─────────────────┘
-            │
-            ▼
+                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    llama.cpp + ROCm                          │
+│                 Envoy Gateway (:4001)                        │
+│                                                              │
+│  /v1/embeddings  ──────────────────────► :8001 (Embedding)  │
+│  /v1/rerank      ──────────────────────► :8002 (Reranking)  │
+│  /v1/chat/*      ──────────────────────► :8000 (Chat)       │
+│  /v1/completions ──────────────────────► :8000 (Chat)       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│  Chat (:8000) │    │ Embed (:8001) │    │Rerank (:8002) │
+│  Devstral-2   │    │  Qwen3-Embed  │    │ BGE-Reranker  │
+│     123B      │    │      8B       │    │    v2-m3      │
+└───────────────┘    └───────────────┘    └───────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    llama.cpp + ROCm 7.1.1                    │
 │               AMD Ryzen AI Max+ 395 APU                      │
 │                    96GB Unified VRAM                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Endpoints
+## OpenAI-Compatible Aliases
 
-### LiteLLM Proxy (Chat Only)
-| Endpoint | Port | Model Aliases |
-|----------|------|---------------|
-| `/v1/chat/completions` | 4000 | gpt-4, gpt-4-turbo, gpt-4o, gpt-3.5-turbo, claude-3-opus, claude-3-sonnet, qwen3-coder |
+All requests go through `http://localhost:4001`:
 
-**Note**: LiteLLM provides OpenAI API compatibility for chat. Use existing OpenAI SDKs with:
 ```bash
-export OPENAI_API_BASE=http://localhost:4000
-export OPENAI_API_KEY=sk-local-llm-master
+export OPENAI_API_BASE=http://localhost:4001/v1
+export OPENAI_API_KEY=sk-local  # Any value works
 ```
 
-### Direct Backend Access (HTTP)
-| Service | Port | Endpoint |
-|---------|------|----------|
-| Chat | 8000 | `http://localhost:8000/v1/chat/completions` |
-| Embeddings | 8001 | `http://localhost:8001/v1/embeddings` |
-| Reranker | 8002 | `http://localhost:8002/v1/rerank` |
+| Request Model | Routes To |
+|--------------|-----------|
+| `gpt-4`, `gpt-4-turbo`, `gpt-4o` | Devstral-2-123B |
+| `claude-3-opus`, `claude-3-sonnet` | Devstral-2-123B |
+| `devstral`, `devstral-2`, `mistral-large` | Devstral-2-123B |
+| `text-embedding-ada-002`, `text-embedding-3-small` | Qwen3-Embed-8B |
+| `rerank-english-v3.0`, `bge-reranker` | BGE-Reranker-v2-m3 |
 
-> **Note**: Embeddings and reranking must be accessed directly. LiteLLM has compatibility issues with llama.cpp's embedding response format.
+## Configuration System
+
+All configuration is driven from `nix/llm-config.nix`:
+
+```bash
+# View active configuration
+nix run .#generate-configs -- show
+
+# Generate all configs to configs/generated/
+nix run .#generate-configs -- generate
+
+# Install systemd services
+nix run .#generate-configs -- install
+```
+
+### Generated Files
+
+| File | Purpose |
+|------|---------|
+| `chat.conf` | llama.cpp server config for chat model |
+| `embedding.conf` | llama.cpp server config for embeddings |
+| `reranking.conf` | llama.cpp server config for reranker |
+| `envoy.yaml` | Envoy gateway routing configuration |
+| `litellm-config.yaml` | LiteLLM proxy configuration (alternative) |
+| `llama-server-*.service` | Systemd unit files |
+| `CONFIGURATION.md` | Human-readable documentation |
+
+### Changing Models
+
+Edit `nix/llm-config.nix` to switch models:
+
+```nix
+# In activeConfig.services.chat:
+model = modelLibrary.chat.devstral2-123b;     # Current: 123B Q4
+# model = modelLibrary.chat.devstral2-24b;    # Faster: 24B Q8
+# model = modelLibrary.chat.qwen3-coder-30b;  # Alternative: Qwen3
+```
+
+Then regenerate: `nix run .#generate-configs -- generate`
+
+## Available Models
+
+### Chat Models
+
+| Key | Model | Size | SWE-bench | Notes |
+|-----|-------|------|-----------|-------|
+| `devstral2-123b` | Devstral-2-123B Q4_K_M | 75 GB | 72.2% | Best coding, 256K ctx |
+| `devstral2-123b-q5` | Devstral-2-123B Q5_K_M | 88 GB | 72.2% | Higher quality, 64K ctx |
+| `devstral2-24b` | Devstral-Small-2 Q8_0 | 25 GB | 68.0% | Fast inference |
+| `qwen3-coder-30b` | Qwen3-Coder-30B-A3B Q6_K | 24 GB | — | MoE, good for coding |
+
+### Embedding & Reranking
+
+| Key | Model | Size | Dimensions |
+|-----|-------|------|------------|
+| `qwen3-embed-8b` | Qwen3-Embedding-8B Q8 | 8.5 GB | 4096 |
+| `bge-reranker-v2-m3` | BGE-Reranker-v2-m3 Q8 | 1.2 GB | — |
 
 ## Directory Structure
 
 ```
 local-llama/
-├── flake.nix              # Nix flake for reproducible builds
-├── flake.lock             # Locked dependencies
+├── flake.nix              # Nix flake with apps and packages
+├── nix/
+│   └── llm-config.nix     # Unified configuration module
 ├── scripts/               # Build and runtime scripts
 │   ├── build-llama-uma.sh
 │   ├── build-llama-rocm.sh
 │   ├── start-server.sh
-│   ├── start-litellm.sh   # LiteLLM proxy launcher
-│   ├── firewall-update.sh # Firewall rule management
-│   ├── deploy-webui.sh    # Open WebUI chat interface
+│   ├── rocm-vram-fix.sh
 │   └── benchmark.sh
-├── configs/               # Model and server configurations
-│   ├── models.yaml
-│   ├── litellm-config.yaml # LiteLLM routing config
-│   ├── qwen3-coder.conf
-│   ├── qwen3-embed.conf
-│   └── bge-reranker.conf
+├── configs/
+│   ├── envoy.yaml         # Active Envoy config
+│   ├── aigw-config.yaml   # AI Gateway (K8s style) config
+│   └── generated/         # Auto-generated configs
 ├── systemd/               # Service unit files
-│   ├── llama-server@.service
-│   ├── llama-nginx-proxy.service
-│   └── litellm-proxy.service
 └── docs/                  # Extended documentation
-    ├── hardware.md
-    ├── rocm-setup.md
-    └── troubleshooting.md
 ```
 
-## Systemd Services
+## Nix Flake Apps
 
 ```bash
-# Enable services to start on boot
-sudo systemctl enable llama-server@qwen3-coder
-sudo systemctl enable llama-server@qwen3-embed
-sudo systemctl enable llama-server@bge-reranker
-sudo systemctl enable llama-nginx-proxy
-
-# Start all services
-sudo systemctl start llama-server@qwen3-coder
-sudo systemctl start llama-server@qwen3-embed
-sudo systemctl start llama-server@bge-reranker
-sudo systemctl start llama-nginx-proxy
-
-# Check status
-sudo systemctl status llama-server@qwen3-coder
-
-# View logs
-journalctl -u llama-server@qwen3-coder -f
+nix run .#generate-configs  # Generate all configuration files
+nix run .#envoy             # Start Envoy gateway
+nix run .#litellm           # Start LiteLLM proxy (alternative)
+nix run .#firewall          # Manage firewall rules
+nix run .#webui             # Start Open WebUI chat interface
+nix run .#install           # Install systemd services
 ```
 
 ## Firewall Configuration
 
-To allow network access to LLM services (required for remote clients):
-
 ```bash
-# Using Nix flake
-nix run .#firewall enable    # Open ports 4000, 8000, 8001, 8002
-nix run .#firewall disable   # Close ports (localhost only)
-nix run .#firewall status    # Show current firewall rules
-
-# Using script directly
-./scripts/firewall-update.sh enable
-./scripts/firewall-update.sh status
+nix run .#firewall enable   # Open ports 4001, 8000-8002
+nix run .#firewall disable  # Close ports (localhost only)
+nix run .#firewall status   # Show current rules
 ```
-
-Supports UFW (Ubuntu/Debian), firewalld (Fedora/RHEL), and iptables fallback.
 
 | Port | Service | Description |
 |------|---------|-------------|
 | 3000 | Open WebUI | Chat interface (optional) |
-| 4000 | LiteLLM Proxy | Main API gateway (chat) |
-| 8000 | Chat Model | Qwen3-Coder backend |
-| 8001 | Embeddings | Qwen3-Embed backend |
-| 8002 | Reranker | BGE-Reranker backend |
+| 4001 | Envoy Gateway | Main API gateway |
+| 8000 | Chat Backend | Devstral-2-123B |
+| 8001 | Embedding Backend | Qwen3-Embed-8B |
+| 8002 | Reranking Backend | BGE-Reranker |
 
-## Chat Interface (Open WebUI)
+## Memory Planning
 
-Optional ChatGPT-like web interface for interacting with your local LLM:
-
-```bash
-# Using Nix flake
-nix run .#webui start    # Start Open WebUI on port 3000
-nix run .#webui stop     # Stop the container
-nix run .#webui status   # Show container status
-nix run .#webui logs     # Follow container logs
-nix run .#webui update   # Pull latest image and restart
-
-# Using script directly
-./scripts/deploy-webui.sh start
-./scripts/deploy-webui.sh status
+KV Cache formula (Q8 quantization):
+```
+KV_Cache_GB = ctx_size × n_layers × d_model × 2 × 2 × 0.5 / 1e9
 ```
 
-Access the interface at: http://localhost:3000
+For Devstral-2-123B (88 layers):
 
-**Requirements**: Docker must be installed and running.
-
-**Environment Variables**:
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WEBUI_PORT` | 3000 | Web interface port |
-| `LITELLM_URL` | http://localhost:4000/v1 | LiteLLM API endpoint |
-| `LITELLM_KEY` | sk-local-llm-master | API key for LiteLLM |
-
-## Models
-
-| Model | Size | Context | Port | Use Case |
-|-------|------|---------|------|----------|
-| Qwen3-Coder-30B-A3B-Q6_K | ~24GB | 256K | 8000 | Coding, chat |
-| Qwen3-Embedding-8B-Q8_0 | ~8GB | 8K | 8001 | Text embeddings |
-| BGE-Reranker-v2-m3-Q8_0 | ~0.6GB | 512 | 8002 | Relevance reranking |
-
-## Memory Requirements
-
-KV Cache size formula (Q8 quantization):
-```
-KV_Cache_GB = (ctx_size * n_layers * d_model * 2 * 2) / (1024^3) * 0.5
-```
-
-| Context Size | KV Cache (Q8) | Model (24B Q4) | Total |
-|-------------|---------------|----------------|-------|
-| 262144 (256K) | ~21.7GB | ~13.3GB | ~35GB |
-| 131072 (128K) | ~10.9GB | ~13.3GB | ~24GB |
-| 65536 (64K) | ~5.4GB | ~13.3GB | ~19GB |
-
-## Nix Flake Usage
-
-```bash
-# Show available outputs
-nix flake show
-
-# Enter development shell (includes litellm, jq, curl)
-nix develop
-
-# Build packages
-nix build .#litellm-config
-
-# Run apps
-nix run .#install   # Install systemd services
-nix run .#litellm   # Start LiteLLM proxy
-```
-
-### NixOS Module (WIP)
-
-```nix
-{
-  inputs.local-llama.url = "github:user/local-llama";
-
-  # In your NixOS configuration:
-  services.llama-server = {
-    enable = true;
-    rocm.gpuTarget = "gfx1151";
-    rocm.umaEnabled = true;
-
-    models.chat = {
-      modelFile = "Qwen3-Coder-30B-A3B-Q6_K.gguf";
-      port = 8000;
-      contextSize = 262144;
-    };
-
-    proxy.type = "litellm";
-    proxy.cache.enable = true;
-  };
-}
-```
-
-## Why LiteLLM?
-
-LiteLLM provides OpenAI API compatibility for chat completions:
-- **Model Aliasing**: Use `gpt-4` or `claude-3-sonnet` aliases with local models
-- **Drop-in Replacement**: Works with existing OpenAI SDKs and tools
-- **Rate Limiting**: Built-in request rate limiting
-- **Usage Tracking**: Monitor token usage and costs
-
-> **Current Limitation**: LiteLLM has compatibility issues with llama.cpp's embedding API response format. For embeddings and reranking, access the backends directly on ports 8001 and 8002.
+| Context | KV Cache (Q8) | Model (Q4) | Total |
+|---------|---------------|------------|-------|
+| 256K | ~14 GB | 75 GB | ~89 GB |
+| 128K | ~7 GB | 75 GB | ~82 GB |
+| 64K | ~3.5 GB | 75 GB | ~78 GB |
 
 ## Troubleshooting
 
-See [docs/troubleshooting.md](docs/troubleshooting.md) for common issues:
-- ROCm VRAM detection issues
-- OOM errors
-- Port binding conflicts
-- Systemd service management
+| Issue | Solution |
+|-------|----------|
+| OOM errors | Reduce `contextSize` in llm-config.nix |
+| ROCm shows ~2.5GB VRAM | Add `-fit off` flag, set `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` |
+| Slow inference | Verify all layers on GPU, enable `--flash-attn on` |
+| Port in use | `lsof -i :8000` to find process |
+
+See [docs/troubleshooting.md](docs/troubleshooting.md) for more.
 
 ## License
 
