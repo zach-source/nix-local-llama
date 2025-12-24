@@ -6,6 +6,7 @@
 #   ./scripts/firewall-update.sh [enable|disable|status]
 #
 # Ports:
+#   3000  - Open WebUI (chat interface)
 #   4000  - LiteLLM Proxy (main API gateway)
 #   8000  - Chat model (Qwen3-Coder)
 #   8001  - Embeddings model (Qwen3-Embed)
@@ -14,16 +15,18 @@
 set -euo pipefail
 
 # Configuration
+WEBUI_PORT="${WEBUI_PORT:-3000}"
 LITELLM_PORT="${LITELLM_PORT:-4000}"
 CHAT_PORT="${CHAT_PORT:-8000}"
 EMBED_PORT="${EMBED_PORT:-8001}"
 RERANK_PORT="${RERANK_PORT:-8002}"
 
 # All ports to manage
-PORTS=("$LITELLM_PORT" "$CHAT_PORT" "$EMBED_PORT" "$RERANK_PORT")
+PORTS=("$WEBUI_PORT" "$LITELLM_PORT" "$CHAT_PORT" "$EMBED_PORT" "$RERANK_PORT")
 
 # Service names for comments/labels
 declare -A PORT_NAMES=(
+    ["$WEBUI_PORT"]="Open-WebUI"
     ["$LITELLM_PORT"]="LiteLLM-Proxy"
     ["$CHAT_PORT"]="LLaMA-Chat"
     ["$EMBED_PORT"]="LLaMA-Embed"
