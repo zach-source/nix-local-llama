@@ -695,6 +695,12 @@
           main
         '';
 
+        # Python with huggingface_hub for downloads
+        pythonWithHF = pkgs.python3.withPackages (ps: [
+          ps.huggingface-hub
+          ps.tqdm
+        ]);
+
         # Model download helper script
         downloadModelScript = pkgs.writeShellScriptBin "llama-download" ''
           #!/usr/bin/env bash
@@ -743,24 +749,30 @@
 
               mkdir -p "$MODELS_DIR"
 
-              # Handle multiple files (comma-separated)
-              IFS=',' read -ra FILE_LIST <<< "$files"
-              for file in "${"$"}{FILE_LIST[@]}"; do
-                  local basename="${"$"}{file##*/}"
-                  log_info "Downloading $basename from $repo..."
+              # Use Python huggingface_hub library (handles auth, split files, resume)
+              log_info "Downloading from $repo using huggingface_hub..."
+              ${pythonWithHF}/bin/python3 << PYTHON
+          import os
+          from huggingface_hub import hf_hub_download
 
-                  if command -v huggingface-cli &>/dev/null; then
-                      huggingface-cli download "$repo" "$file" \
-                          --local-dir "$MODELS_DIR" \
-                          --local-dir-use-symlinks False
-                  else
-                      log_warn "huggingface-cli not found, using curl..."
-                      curl -L -o "$MODELS_DIR/$basename" \
-                          "https://huggingface.co/$repo/resolve/main/$file"
-                  fi
+          repo_id = "$repo"
+          files = "$files".split(",")
+          local_dir = "$MODELS_DIR"
 
-                  log_success "Downloaded $basename"
-              done
+          for f in files:
+              f = f.strip()
+              basename = os.path.basename(f)
+              print(f"[INFO] Downloading {basename}...")
+              path = hf_hub_download(
+                  repo_id=repo_id,
+                  filename=f,
+                  local_dir=local_dir,
+                  local_dir_use_symlinks=False
+              )
+              print(f"[OK] Downloaded to {path}")
+          PYTHON
+
+              log_success "Download complete"
           }
 
           list_models() {
