@@ -72,11 +72,11 @@ deploy() {
     echo ""
     log_success "Deployment complete!"
     echo ""
-    echo "LLM API available at: http://llm.stigen.home"
+    echo "LLM API available at: https://llm.stigen.home"
     echo ""
     echo "Test with:"
-    echo "  curl http://llm.stigen.home/health"
-    echo "  curl http://llm.stigen.home/v1/models"
+    echo "  curl -sk https://llm.stigen.home/health"
+    echo "  curl -sk https://llm.stigen.home/v1/models"
 }
 
 undeploy() {
@@ -121,14 +121,14 @@ test_gateway() {
 
     echo ""
     echo -n "  Health check: "
-    if curl -s --connect-timeout 5 "http://llm.stigen.home/health" | grep -q "ok"; then
+    if curl -sk --connect-timeout 5 "https://llm.stigen.home/health" | grep -q "ok"; then
         echo -e "${GREEN}OK${NC}"
     else
         echo -e "${RED}FAIL${NC}"
     fi
 
     echo -n "  Models list: "
-    if curl -s --connect-timeout 5 "http://llm.stigen.home/v1/models" | grep -q "model"; then
+    if curl -sk --connect-timeout 5 "https://llm.stigen.home/v1/models" | grep -q "model"; then
         echo -e "${GREEN}OK${NC}"
     else
         echo -e "${RED}FAIL${NC}"
@@ -136,9 +136,10 @@ test_gateway() {
 
     echo ""
     log_info "Full chat test:"
-    curl -s "http://llm.stigen.home/v1/chat/completions" \
+    curl -sk "https://llm.stigen.home/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d '{"model": "devstral", "messages": [{"role": "user", "content": "Say hello in 5 words"}], "max_tokens": 50}' \
+        -d '{"model": "qwen", "messages": [{"role": "user", "content": "Say hello in 5 words"}], "max_tokens": 50}' \
+        --max-time 60 \
         | jq -r '.choices[0].message.content' 2>/dev/null || echo "(Chat service may not be running)"
 }
 

@@ -8,8 +8,9 @@ metadata:
   namespace: llm-stack
 spec:
   parentRefs:
-    - name: llm-gateway
-      namespace: llm-stack
+    - name: hello-gateway
+      namespace: hello-world
+      sectionName: https  # Reference the HTTPS listener
   hostnames:
     - "llm.stigen.home"
   rules:

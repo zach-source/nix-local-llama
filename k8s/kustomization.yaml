@@ -6,9 +6,15 @@ namespace: llm-stack
 resources:
   - namespace.yaml
   - endpoints.yaml
-  - gateway.yaml
+  # gateway.yaml is commented - we use shared hello-gateway
+  # - gateway.yaml
   - httproutes.yaml
 
-commonLabels:
-  app.kubernetes.io/part-of: local-llama
-  app.kubernetes.io/managed-by: kustomize
+# Use labels instead of commonLabels (deprecated)
+# Set includeSelectors: false to avoid adding selectors to Services
+# This is critical for headless services with manual endpoints
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: local-llama
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
