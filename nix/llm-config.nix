@@ -26,6 +26,8 @@
   pkgs ? import <nixpkgs> { },
 
   # Configurable paths with sensible defaults
+  userName ? builtins.getEnv "USER",
+  userHome ? builtins.getEnv "HOME",
   modelsDir ? builtins.getEnv "MODELS_DIR",
   llamaCppDir ? builtins.getEnv "LLAMA_DIR",
   rocmPath ? "/opt/rocm",
@@ -46,10 +48,12 @@
 }:
 
 let
-  # Resolve paths with fallback defaults
+  # Resolve user and paths with fallback defaults (use absolute paths for systemd compatibility)
+  resolvedUser = if userName != "" then userName else "ztaylor";
+  resolvedHome = if userHome != "" then userHome else "/home/${resolvedUser}";
   paths = {
-    models = if modelsDir != "" then modelsDir else "$HOME/models";
-    llamaCpp = if llamaCppDir != "" then llamaCppDir else "$HOME/llama.cpp";
+    models = if modelsDir != "" then modelsDir else "${resolvedHome}/models";
+    llamaCpp = if llamaCppDir != "" then llamaCppDir else "${resolvedHome}/llama.cpp";
     rocm = rocmPath;
     config = configDir;
   };
@@ -479,8 +483,8 @@ let
 
       [Service]
       Type=simple
-      User=%u
-      Group=%u
+      User=${resolvedUser}
+      Group=${resolvedUser}
 
       ${envVars}
 

@@ -95,6 +95,13 @@
         # ROCm environment from llmConfig
         rocmEnv = llmConfig.activeConfig.hardware.environment;
 
+        # Resolve user for systemd services (environment variable at build time)
+        resolvedUser =
+          let
+            u = builtins.getEnv "USER";
+          in
+          if u != "" then u else "ztaylor";
+
         # Generate systemd service for a model
         makeModelService =
           name: cfg:
@@ -107,8 +114,8 @@
 
             [Service]
             Type=simple
-            User=%u
-            Group=%u
+            User=${resolvedUser}
+            Group=${resolvedUser}
 
             ${builtins.concatStringsSep "\n" (
               builtins.attrValues (builtins.mapAttrs (k: v: "Environment=\"${k}=${v}\"") rocmEnv)

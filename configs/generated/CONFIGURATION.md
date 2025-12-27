@@ -12,8 +12,8 @@
 
 | Setting | Value |
 |---------|-------|
-| Models Directory | `$HOME/models` |
-| llama.cpp Directory | `$HOME/llama.cpp` |
+| Models Directory | `/home/ztaylor/models` |
+| llama.cpp Directory | `/home/ztaylor/llama.cpp` |
 | ROCm Path | `/opt/rocm` |
 | Config Directory | `/etc/llama-server` |
 

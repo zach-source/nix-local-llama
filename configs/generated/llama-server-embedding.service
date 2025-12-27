@@ -6,8 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=%u
-Group=%u
+User=ztaylor
+Group=ztaylor
 
 Environment="GGML_CUDA_ENABLE_UNIFIED_MEMORY=1"
 Environment="GPU_MAX_ALLOC_PERCENT=99"
