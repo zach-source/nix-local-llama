@@ -1,0 +1,109 @@
+# HTTPRoutes for LLM API routing
+# Routes OpenAI-compatible endpoints to appropriate backend services
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: llm-routes
+  namespace: llm-stack
+spec:
+  parentRefs:
+    - name: llm-gateway
+      namespace: llm-stack
+  hostnames:
+    - "llm.stigen.home"
+  rules:
+    # Embeddings → llama-embed service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/embeddings
+      backendRefs:
+        - name: llama-embed
+          port: 8001
+      timeouts:
+        request: 120s
+        backendRequest: 120s
+
+    # Reranking → llama-rerank service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/rerank
+      backendRefs:
+        - name: llama-rerank
+          port: 8002
+      timeouts:
+        request: 60s
+        backendRequest: 60s
+
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /rerank
+      backendRefs:
+        - name: llama-rerank
+          port: 8002
+      timeouts:
+        request: 60s
+        backendRequest: 60s
+
+    # Chat completions → llama-chat service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/chat
+      backendRefs:
+        - name: llama-chat
+          port: 8000
+      timeouts:
+        request: 600s
+        backendRequest: 600s
+
+    # Legacy completions → llama-chat service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/completions
+      backendRefs:
+        - name: llama-chat
+          port: 8000
+      timeouts:
+        request: 600s
+        backendRequest: 600s
+
+    # Models list → llama-chat service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/models
+      backendRefs:
+        - name: llama-chat
+          port: 8000
+      timeouts:
+        request: 10s
+        backendRequest: 10s
+
+    # Health check → llama-chat service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /health
+      backendRefs:
+        - name: llama-chat
+          port: 8000
+      timeouts:
+        request: 5s
+        backendRequest: 5s
+
+    # Default catch-all → llama-chat service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: llama-chat
+          port: 8000
+      timeouts:
+        request: 600s
+        backendRequest: 600s

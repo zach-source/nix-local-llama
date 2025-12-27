@@ -1,0 +1,90 @@
+# Endpoints pointing to host systemd services
+# These expose the bare-metal llama-server instances to Kubernetes
+# UMA performance is preserved since services run directly on host
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-chat
+  namespace: llm-stack
+  labels:
+    app: llama-chat
+    model: devstral-2-123b
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  clusterIP: None  # Headless - we'll define endpoints manually
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llama-chat
+  namespace: llm-stack
+subsets:
+  - addresses:
+      - ip: 192.168.1.31  # Host IP running systemd service
+    ports:
+      - name: http
+        port: 8000
+        protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-embed
+  namespace: llm-stack
+  labels:
+    app: llama-embed
+    model: qwen3-embedding-8b
+spec:
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+      protocol: TCP
+  clusterIP: None
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llama-embed
+  namespace: llm-stack
+subsets:
+  - addresses:
+      - ip: 192.168.1.31
+    ports:
+      - name: http
+        port: 8001
+        protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-rerank
+  namespace: llm-stack
+  labels:
+    app: llama-rerank
+    model: bge-reranker-v2-m3
+spec:
+  ports:
+    - name: http
+      port: 8002
+      targetPort: 8002
+      protocol: TCP
+  clusterIP: None
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: llama-rerank
+  namespace: llm-stack
+subsets:
+  - addresses:
+      - ip: 192.168.1.31
+    ports:
+      - name: http
+        port: 8002
+        protocol: TCP

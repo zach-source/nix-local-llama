@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-stack
+  labels:
+    app.kubernetes.io/name: llm-stack
+    app.kubernetes.io/part-of: local-llama

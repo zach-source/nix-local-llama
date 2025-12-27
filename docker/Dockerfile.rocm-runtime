@@ -1,0 +1,49 @@
+# Slim ROCm Runtime Image for llama.cpp
+# Use this for future containerization once UMA is validated
+#
+# Build: docker build -t llama-rocm:7.1.1 -f docker/Dockerfile.rocm-runtime .
+# Run:   docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+#          -e HSA_OVERRIDE_GFX_VERSION=11.5.1 \
+#          -e GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 \
+#          -v ~/models:/models:ro \
+#          -v ~/llama.cpp/build-rocm/bin:/app:ro \
+#          -p 8000:8000 \
+#          llama-rocm:7.1.1 \
+#          /app/llama-server --model /models/Q4_K_M/Devstral-2-123B-Instruct-2512-Q4_K_M-00001-of-00002.gguf ...
+
+FROM rocm/runtime-ubuntu-24.04:7.1.1
+
+LABEL maintainer="local-llama"
+LABEL description="ROCm runtime for llama.cpp with UMA support"
+LABEL rocm.version="7.1.1"
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user (optional, may need root for /dev/kfd access)
+# RUN useradd -m -s /bin/bash llama
+# USER llama
+
+WORKDIR /app
+
+# Environment for Strix Halo APU (gfx1151)
+ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
+ENV HIP_VISIBLE_DEVICES=0
+ENV GPU_MAX_HW_QUEUES=8
+ENV GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
+ENV ROCBLAS_USE_HIPBLASLT=1
+ENV HSA_ENABLE_SDMA=0
+ENV GPU_MAX_HEAP_SIZE=99
+ENV GPU_MAX_ALLOC_PERCENT=99
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default command (override with actual model path)
+ENTRYPOINT ["/app/llama-server"]
+CMD ["--help"]
